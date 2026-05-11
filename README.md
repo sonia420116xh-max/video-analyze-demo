@@ -1,6 +1,6 @@
 # AI 视频分镜拆解工具 - 后端
 
-基于 Python + FastAPI 实现，支持本地 Whisper/OpenAI 转写，以及 GPTProto、GPT-4o、通义千问做分镜拆解。
+基于 Python + FastAPI 实现，支持本地 Whisper/OpenAI 转写，以及 gemini-2.5-pro、gpt-4o、qwen-turbo 等具体模型做分镜拆解。
 
 ## 一、安装依赖
 
@@ -45,10 +45,9 @@ export WHISPER_MODEL=base
 
 前端模型说明：
 
-- `Gemini 2.5 Pro`：走 `gptproto /v1/chat/completions`，模型名取 `BRAIN_MODEL`
-- `GPTProto`：同上，兼容原来的自定义 `gptproto` 入口
-- `GPT-4o (GPTProto Chat)`：走 `gptproto /v1/chat/completions`，固定模型名 `gpt-4o`
-- `GPT-4o (OpenAI)`：直连 OpenAI 官方接口，需要 `OPENAI_API_KEY`
+- `gemini-2.5-pro`：走 `gptproto /v1/chat/completions`，实际模型名就是 `gemini-2.5-pro`
+- `gpt-4o`：走 `gptproto /v1/responses`，使用 `input_text + input_image` 传入字幕与关键帧，实际模型名就是 `gpt-4o`
+- `qwen-turbo`：走 DashScope 文本生成接口，需要 `DASHSCOPE_KEY`
 
 ## 三、启动后端
 

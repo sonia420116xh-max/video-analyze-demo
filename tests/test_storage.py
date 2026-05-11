@@ -2,12 +2,109 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
 
 class AnalysisStorageTest(unittest.TestCase):
+    def test_gpt4o_uses_gptproto_responses_api_with_input_images(self):
+        visual_frames = [
+            {
+                "id": "F01",
+                "timestamp": 1.2,
+                "data_url": "data:image/jpeg;base64,abc",
+            }
+        ]
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"output_text": '[{"title":"故事开场"}]'}
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "GPTPROTO_VISION_MODEL", "gpt-4o"), \
+             patch.object(main, "sample_visual_frames", return_value=visual_frames), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch("main.requests.post", return_value=response) as post:
+            result = main.analyze_video("TRANSCRIPT", "gpt-4o", "/tmp/demo.mp4")
+
+        self.assertEqual(result, '[{"title":"故事开场"}]')
+        url = post.call_args.args[0]
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(url, "https://gptproto.com/v1/responses")
+        self.assertEqual(payload["model"], "gpt-4o")
+        self.assertEqual(payload["input"][0]["role"], "user")
+        content = payload["input"][0]["content"]
+        self.assertEqual(content[0], {"type": "input_text", "text": "PROMPT"})
+        self.assertIn({"type": "input_image", "image_url": "data:image/jpeg;base64,abc"}, content)
+
+    def test_gemini_keeps_gemini_model_when_visual_frames_exist(self):
+        visual_frames = [
+            {
+                "id": "F01",
+                "timestamp": 1.2,
+                "data_url": "data:image/jpeg;base64,abc",
+            }
+        ]
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": '[{"title":"故事开场"}]'}}]
+        }
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "BRAIN_MODEL", "gemini-2.5-pro"), \
+             patch.object(main, "GPTPROTO_VISION_MODEL", "gpt-4o"), \
+             patch.object(main, "sample_visual_frames", return_value=visual_frames), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch("main.requests.post", return_value=response) as post:
+            result = main.analyze_video("TRANSCRIPT", "gemini-2.5-pro", "/tmp/demo.mp4")
+
+        self.assertEqual(result, '[{"title":"故事开场"}]')
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(post.call_args.args[0], "https://gptproto.com/v1/chat/completions")
+        self.assertEqual(payload["model"], "gemini-2.5-pro")
+
+    def test_available_model_options_empty_when_no_keys_are_configured(self):
+        with patch.object(main, "GPTPROTO_API_KEY", ""), \
+             patch.object(main, "OPENAI_API_KEY", ""), \
+             patch.object(main, "DASHSCOPE_KEY", ""), \
+             patch.object(main, "BAIDU_KEY", ""):
+            options = main.get_available_model_options()
+
+        self.assertEqual(options, [])
+
+    def test_available_model_options_hide_unconfigured_or_unimplemented_models(self):
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "OPENAI_API_KEY", ""), \
+             patch.object(main, "DASHSCOPE_KEY", ""), \
+             patch.object(main, "BAIDU_KEY", ""):
+            options = main.get_available_model_options()
+
+        values = [option["value"] for option in options]
+        labels = [option["label"] for option in options]
+        self.assertEqual(values, ["gemini-2.5-pro", "gpt-4o"])
+        self.assertEqual(labels, values)
+        self.assertNotIn("gptproto", values)
+        self.assertNotIn("gptproto-gpt4o", values)
+        self.assertNotIn("gpt4o", values)
+        self.assertNotIn("tongyi", values)
+        self.assertNotIn("baidu", values)
+
+    def test_available_model_options_include_openai_and_tongyi_when_keys_exist(self):
+        with patch.object(main, "GPTPROTO_API_KEY", ""), \
+             patch.object(main, "OPENAI_API_KEY", "openai-key"), \
+             patch.object(main, "DASHSCOPE_KEY", "dashscope-key"), \
+             patch.object(main, "BAIDU_KEY", "baidu-key"):
+            options = main.get_available_model_options()
+
+        values = [option["value"] for option in options]
+        labels = [option["label"] for option in options]
+        self.assertEqual(values, ["qwen-turbo"])
+        self.assertEqual(labels, values)
+        self.assertNotIn("baidu", values)
+
     def test_save_list_and_detail_analysis_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "analysis.db"

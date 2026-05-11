@@ -18,16 +18,21 @@
             <el-button>上传视频</el-button>
           </el-upload>
 
-          <el-select v-model="modelType" placeholder="选择模型" class="model-select">
-            <el-option label="Gemini 2.5 Pro" value="gemini-2.5-pro" />
-            <el-option label="GPTProto" value="gptproto" />
-            <el-option label="GPT-4o (GPTProto Chat)" value="gptproto-gpt4o" />
-            <el-option label="GPT-4o (OpenAI)" value="gpt4o" />
-            <el-option label="通义千问" value="tongyi" />
-            <el-option label="文心一言" value="baidu" />
+          <el-select
+            v-model="modelType"
+            placeholder="选择模型"
+            class="model-select"
+            :disabled="modelOptions.length === 0"
+          >
+            <el-option
+              v-for="option in modelOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
 
-          <el-button type="primary" @click="startAnalyze" :loading="loading">
+          <el-button type="primary" @click="startAnalyze" :loading="loading" :disabled="!modelType">
             {{ loading ? '后台分析中' : '开始AI拆解' }}
           </el-button>
         </div>
@@ -66,9 +71,9 @@
             :class="{ active: item.id === activeAnalysisId }"
             role="button"
             tabindex="0"
-            @click="loadAnalysis(item.id)"
-            @keydown.enter.prevent="loadAnalysis(item.id)"
-            @keydown.space.prevent="loadAnalysis(item.id)"
+            @click="handleHistorySelect(item)"
+            @keydown.enter.prevent="handleHistorySelect(item)"
+            @keydown.space.prevent="handleHistorySelect(item)"
           >
             <span class="history-card-head">
               <span class="history-title">{{ item.filename }}</span>
@@ -81,6 +86,15 @@
               >
                 删除
               </el-button>
+            </span>
+            <span class="history-status-row">
+              <el-tag
+                size="small"
+                :type="getAnalysisStatusTagType(item.id)"
+                effect="plain"
+              >
+                {{ getAnalysisStatusText(item.id) }}
+              </el-tag>
             </span>
             <span class="history-meta">
               {{ item.formula || '未识别模式' }} / {{ item.subtype || '待判断' }} · {{ item.shot_count || 0 }} 个分镜
@@ -113,7 +127,12 @@
         </aside>
 
         <main class="story-panel">
-          <div v-if="resultList.length > 0" class="result-head">
+          <div v-if="isActiveReanalysisRunning" class="regenerating-state" v-loading="true">
+            <h3>正在重新生成中</h3>
+            <p>{{ jobMessage || '正在重新抽帧、转写并调用 AI 生成新的视频拆解结果。' }}</p>
+          </div>
+
+          <div v-else-if="resultList.length > 0" class="result-head">
             <div>
               <p class="eyebrow">爆款公式</p>
               <!-- <h3>{{ formulaName }} / {{ formulaSubtype }}</h3> -->
@@ -136,7 +155,7 @@
             </div>
           </div>
 
-          <div v-if="resultList.length > 0" class="story-list">
+          <div v-if="!isActiveReanalysisRunning && resultList.length > 0" class="story-list">
             <article
               class="story-item"
               v-for="(item, idx) in resultList"
@@ -174,7 +193,7 @@
             </article>
           </div>
 
-          <div v-else class="empty-result">
+          <div v-else-if="!isActiveReanalysisRunning" class="empty-result">
             <h3>等待拆解结果</h3>
             <p>上传视频后，会先判断属于第一人称视角、开箱 / ASMR、GRWM + 产品、分屏对比或日常 Vlog，再按对应叙事套路生成分镜。</p>
           </div>
@@ -191,6 +210,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 const fileList = ref([])
 const modelType = ref('gemini-2.5-pro')
+const modelOptions = ref([])
 const loading = ref(false)
 const reanalyzeLoading = ref(false)
 const historyLoading = ref(false)
@@ -205,6 +225,8 @@ const videoPreviewUrl = ref('')
 const isLocalPreview = ref(false)
 const currentFileName = ref('')
 const activeAnalysisId = ref('')
+const reanalyzingAnalysisId = ref('')
+const analysisStatusMap = ref({})
 const analysisVersion = ref(Date.now())
 const videoRef = ref(null)
 let currentFile = null
@@ -227,6 +249,43 @@ const jobStatusText = computed(() => {
   return statusMap[jobStatus.value] || '等待任务状态'
 })
 const canReanalyze = computed(() => Boolean(activeAnalysisId.value) && !loading.value && !reanalyzeLoading.value)
+const isActiveReanalysisRunning = computed(() => {
+  if (!activeAnalysisId.value) return false
+  if (reanalyzingAnalysisId.value !== activeAnalysisId.value) return false
+  return ['queued', 'processing'].includes(jobStatus.value)
+})
+
+const isModelAvailable = (value) => modelOptions.value.some((option) => option.value === value)
+
+const setAnalysisStatus = (analysisId, status) => {
+  if (!analysisId) return
+  analysisStatusMap.value = {
+    ...analysisStatusMap.value,
+    [analysisId]: status,
+  }
+}
+
+const getAnalysisStatus = (analysisId) => analysisStatusMap.value[analysisId] || 'completed'
+
+const getAnalysisStatusText = (analysisId) => {
+  const statusMap = {
+    queued: '等待中',
+    processing: '进行中',
+    completed: '已完成',
+    failed: '失败',
+  }
+  return statusMap[getAnalysisStatus(analysisId)] || '已完成'
+}
+
+const getAnalysisStatusTagType = (analysisId) => {
+  const typeMap = {
+    queued: 'warning',
+    processing: 'warning',
+    completed: 'success',
+    failed: 'danger',
+  }
+  return typeMap[getAnalysisStatus(analysisId)] || 'success'
+}
 
 const normalizeJsonText = (text) => {
   if (typeof text !== 'string') return text
@@ -319,6 +378,10 @@ const startAnalyze = async () => {
     ElMessage.warning('请上传视频')
     return
   }
+  if (!modelType.value) {
+    ElMessage.warning('当前没有可用模型，请先在后端配置对应 API Key')
+    return
+  }
 
   loading.value = true
   const fd = new FormData()
@@ -349,14 +412,41 @@ const reanalyzeCurrent = async () => {
     ElMessage.warning('请先选择一条已保存的视频拆解')
     return
   }
+  if (!modelType.value) {
+    ElMessage.warning('当前没有可用模型，请先在后端配置对应 API Key')
+    return
+  }
 
+  try {
+    await ElMessageBox.confirm(
+      `确定重新拆解「${currentFileName.value || '当前视频'}」吗？确认后会重新生成分镜结果，并替换当前历史记录。`,
+      '重新拆解确认',
+      {
+        confirmButtonText: '确认重新拆解',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  const targetAnalysisId = activeAnalysisId.value
   reanalyzeLoading.value = true
   loading.value = true
+  reanalyzingAnalysisId.value = targetAnalysisId
+  jobStatus.value = 'queued'
+  jobMessage.value = '重新拆解任务已提交，后台分析中'
+  setAnalysisStatus(targetAnalysisId, 'queued')
   try {
     clearJobState()
+    reanalyzingAnalysisId.value = targetAnalysisId
+    jobStatus.value = 'queued'
+    jobMessage.value = '重新拆解任务已提交，后台分析中'
+    setAnalysisStatus(targetAnalysisId, 'queued')
     const fd = new FormData()
     fd.append('model', modelType.value)
-    const res = await axios.post(`/api/analyses/${activeAnalysisId.value}/reanalyze`, fd, { timeout: 60000 })
+    const res = await axios.post(`/api/analyses/${targetAnalysisId}/reanalyze`, fd, { timeout: 60000 })
     currentJobId.value = res.data.job_id || ''
     jobStatus.value = res.data.status || 'queued'
     jobMessage.value = res.data.msg || '重新拆解任务已提交，后台分析中'
@@ -369,6 +459,8 @@ const reanalyzeCurrent = async () => {
     const detail = err?.response?.data?.detail || err?.response?.data?.msg || err?.message
     ElMessage.error(detail ? `重新拆解失败：${detail}` : '重新拆解失败')
     loading.value = false
+    reanalyzingAnalysisId.value = ''
+    setAnalysisStatus(targetAnalysisId, 'failed')
     clearJobState()
   } finally {
     reanalyzeLoading.value = false
@@ -405,10 +497,17 @@ const pollJobStatus = async (jobId, manual = false) => {
     jobStatus.value = job.status
     jobMessage.value = job.message || ''
     currentFileName.value = job.filename || currentFileName.value
+    const affectedAnalysisId = job.replace_analysis_id || job.analysis_id || reanalyzingAnalysisId.value
+    if (affectedAnalysisId && ['queued', 'processing', 'completed', 'failed'].includes(job.status)) {
+      setAnalysisStatus(affectedAnalysisId, job.status)
+      if (job.replace_analysis_id) reanalyzingAnalysisId.value = job.replace_analysis_id
+    }
 
     if (job.status === 'completed') {
       resultList.value = JSON.parse(normalizeJsonText(job.data || '[]'))
       activeAnalysisId.value = job.analysis_id || ''
+      setAnalysisStatus(activeAnalysisId.value, 'completed')
+      reanalyzingAnalysisId.value = ''
       if (job.video_url) setVideoPreview(job.video_url, false)
       analysisVersion.value = Date.now()
       loading.value = false
@@ -420,6 +519,8 @@ const pollJobStatus = async (jobId, manual = false) => {
 
     if (job.status === 'failed') {
       loading.value = false
+      setAnalysisStatus(affectedAnalysisId, 'failed')
+      reanalyzingAnalysisId.value = ''
       clearJobState()
       ElMessage.error(job.message ? `分析失败：${job.message}` : '分析失败')
       return
@@ -462,8 +563,27 @@ const loadHistory = async () => {
   }
 }
 
+const loadModelOptions = async () => {
+  try {
+    const res = await axios.get('/api/model-options', { timeout: 10000 })
+    modelOptions.value = res.data.data || []
+    if (!isModelAvailable(modelType.value)) {
+      modelType.value = modelOptions.value[0]?.value || ''
+    }
+  } catch (err) {
+    console.error('load model options failed:', err)
+    modelOptions.value = []
+    modelType.value = ''
+    ElMessage.error('模型配置加载失败，请确认后端服务已启动')
+  }
+}
+
 const loadAnalysis = async (id) => {
   if (!id) return
+  if (['queued', 'processing'].includes(getAnalysisStatus(id))) {
+    ElMessage.info('该视频正在重新生成中，请稍后查看')
+    return
+  }
   try {
     clearJobState()
     loading.value = false
@@ -472,7 +592,9 @@ const loadAnalysis = async (id) => {
     resultList.value = detail.data || []
     currentFileName.value = detail.filename || ''
     activeAnalysisId.value = detail.id
-    modelType.value = detail.model || modelType.value
+    if (detail.model && isModelAvailable(detail.model)) {
+      modelType.value = detail.model
+    }
     currentFile = null
     fileList.value = []
     setVideoPreview(detail.video_url || '', false)
@@ -482,6 +604,11 @@ const loadAnalysis = async (id) => {
     const detail = err?.response?.data?.detail || err?.message
     ElMessage.error(detail ? `记录加载失败：${detail}` : '记录加载失败')
   }
+}
+
+const handleHistorySelect = (item) => {
+  if (!item?.id) return
+  loadAnalysis(item.id)
 }
 
 const clearCurrentAnalysis = () => {
@@ -528,6 +655,7 @@ const confirmDeleteAnalysis = async (item) => {
 }
 
 onMounted(() => {
+  loadModelOptions()
   loadHistory()
   const pendingJobId = localStorage.getItem('videoAnalyzePendingJobId')
   if (pendingJobId) {
@@ -701,6 +829,12 @@ onBeforeUnmount(() => {
   align-items: center;
 }
 
+.history-status-row {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+}
+
 .history-delete {
   opacity: 0;
   transition: opacity 0.16s ease;
@@ -771,12 +905,36 @@ onBeforeUnmount(() => {
 }
 
 .story-panel {
+  position: relative;
   min-height: 620px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid #dfe6f0;
   border-radius: 8px;
   padding: 20px;
   backdrop-filter: blur(10px);
+}
+
+.regenerating-state {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  min-height: 560px;
+  padding: 32px;
+  text-align: center;
+  color: #667085;
+}
+
+.regenerating-state h3 {
+  margin: 0;
+  color: #263245;
+  font-size: 22px;
+  line-height: 1.3;
+}
+
+.regenerating-state p {
+  max-width: 520px;
+  margin: 12px 0 0;
+  line-height: 1.7;
 }
 
 .result-head {

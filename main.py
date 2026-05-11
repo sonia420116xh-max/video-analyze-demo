@@ -53,6 +53,39 @@ GPTPROTO_VISION_MODEL = os.getenv("GPTPROTO_VISION_MODEL", "gpt-4o")
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
 # ==========================================================
 
+MODEL_OPTIONS = [
+    {
+        "label": "gemini-2.5-pro",
+        "value": "gemini-2.5-pro",
+        "required_key": "GPTPROTO_API_KEY",
+        "implemented": True,
+    },
+    {
+        "label": "gpt-4o",
+        "value": "gpt-4o",
+        "required_key": "GPTPROTO_API_KEY",
+        "implemented": True,
+    },
+    {
+        "label": "GPT-4o (OpenAI)",
+        "value": "gpt4o",
+        "required_key": "OPENAI_API_KEY",
+        "implemented": False,
+    },
+    {
+        "label": "qwen-turbo",
+        "value": "qwen-turbo",
+        "required_key": "DASHSCOPE_KEY",
+        "implemented": True,
+    },
+    {
+        "label": "文心一言",
+        "value": "baidu",
+        "required_key": "BAIDU_KEY",
+        "implemented": False,
+    },
+]
+
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_VIDEO_DIR = BASE_DIR / "videos"
 TEMP_FRAME_DIR = BASE_DIR / "frames"
@@ -379,6 +412,33 @@ def safe_filename(filename):
     return f"{safe_stem}{safe_suffix}"
 
 
+def get_model_api_key(key_name):
+    if key_name == "GPTPROTO_API_KEY":
+        return GPTPROTO_API_KEY
+    if key_name == "OPENAI_API_KEY":
+        return OPENAI_API_KEY
+    if key_name == "DASHSCOPE_KEY":
+        return DASHSCOPE_KEY
+    if key_name == "BAIDU_KEY":
+        return BAIDU_KEY
+    return ""
+
+
+def get_available_model_options():
+    options = []
+    for option in MODEL_OPTIONS:
+        if not option.get("implemented", True):
+            continue
+        required_key = option.get("required_key")
+        if required_key and not str(get_model_api_key(required_key) or "").strip():
+            continue
+        options.append({
+            "label": option["label"],
+            "value": option["value"],
+        })
+    return options
+
+
 def persist_analysis(video_path, original_filename, model, result_json):
     analysis_id = uuid.uuid4().hex
     filename = safe_filename(original_filename)
@@ -452,7 +512,7 @@ def prepare_reanalysis_job(analysis_id, model=None, db_path=DB_PATH, job_upload_
     if not source_video_path.exists() or not source_video_path.is_file():
         raise FileNotFoundError("原视频文件不存在，无法重新拆解")
 
-    target_model = model or record.get("model") or "gpt4o"
+    target_model = model or record.get("model") or "gpt-4o"
     filename = record.get("filename") or source_video_path.name
     job_id = create_analysis_job(filename, target_model)
     job_dir = Path(job_upload_dir) / job_id
@@ -572,6 +632,55 @@ def build_gptproto_messages(prompt, visual_frames):
         })
 
     return [{"role": "user", "content": content}]
+
+
+def build_gptproto_responses_input(prompt, visual_frames):
+    content = [{"type": "input_text", "text": prompt}]
+    for frame in visual_frames:
+        content.append({
+            "type": "input_text",
+            "text": f"{frame['id']}，时间：{frame['timestamp']}s。请只描述这张图中能明确看到的商品和颜色。",
+        })
+        content.append({
+            "type": "input_image",
+            "image_url": frame["data_url"],
+        })
+
+    return [{"role": "user", "content": content}]
+
+
+def extract_gptproto_responses_text(data):
+    if isinstance(data, dict):
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        output = data.get("output")
+        if isinstance(output, list):
+            parts = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for content_item in content:
+                    if not isinstance(content_item, dict):
+                        continue
+                    text = content_item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text)
+            if parts:
+                return "\n".join(parts)
+
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str):
+                return content
+
+    raise RuntimeError("gptproto responses 返回结果中未找到文本内容")
 
 
 def build_analysis_prompt(transcript, visual_frames=None):
@@ -939,9 +1048,11 @@ def audio_to_text():
         print("语音转文字错误:", e)
         return "未识别到音频"
 
-def analyze_video(transcript, model_type, video_path=None):
-    visual_frames = sample_visual_frames(video_path) if video_path else []
-    prompt = build_analysis_prompt(transcript, visual_frames)
+def analyze_video(transcript, model_type, video_path=None, visual_frames=None, prompt=None):
+    if visual_frames is None:
+        visual_frames = sample_visual_frames(video_path) if video_path else []
+    if prompt is None:
+        prompt = build_analysis_prompt(transcript, visual_frames)
 
     if model_type == "gpt4o":
         if not OPENAI_API_KEY:
@@ -962,11 +1073,49 @@ def analyze_video(transcript, model_type, video_path=None):
             print("GPT 分析错误:", e)
             raise RuntimeError(f"OpenAI 分析失败: {e}")
 
-    elif model_type in {"gptproto", "gemini", "gemini-2.5-pro", "gptproto-gpt4o"}:
+    elif model_type in {"gpt-4o", "gptproto-gpt4o"}:
         if not GPTPROTO_API_KEY:
             raise RuntimeError("未配置 GPTPROTO_API_KEY")
 
-        target_model = GPTPROTO_VISION_MODEL if visual_frames else ("gpt-4o" if model_type == "gptproto-gpt4o" else BRAIN_MODEL)
+        target_model = "gpt-4o" if model_type == "gpt-4o" else GPTPROTO_VISION_MODEL
+        try:
+            response = requests.post(
+                f"{BRAIN_BASE_URL.rstrip('/')}/responses",
+                headers={
+                    "Authorization": GPTPROTO_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": target_model,
+                    "input": build_gptproto_responses_input(prompt, visual_frames),
+                },
+                timeout=180,
+            )
+            if response.status_code == 401:
+                raise RuntimeError("GPTPROTO_API_KEY 无效，请检查配置")
+            if response.status_code == 429:
+                raise RuntimeError("gptproto 额度不足或请求受限，请检查配额")
+            response.raise_for_status()
+
+            return normalize_json_text(extract_gptproto_responses_text(response.json()))
+        except requests.HTTPError as e:
+            detail = ""
+            try:
+                detail = response.text
+            except Exception:
+                detail = str(e)
+            raise RuntimeError(f"gptproto responses 请求失败: {detail}")
+        except requests.RequestException as e:
+            raise RuntimeError(f"gptproto responses 网络请求失败: {e}")
+        except Exception as e:
+            print("gptproto responses 分析错误:", e)
+            raise RuntimeError(f"gptproto responses 分析失败: {e}")
+
+    elif model_type in {"gptproto", "gemini", "gemini-2.5-pro"}:
+        if not GPTPROTO_API_KEY:
+            raise RuntimeError("未配置 GPTPROTO_API_KEY")
+
+        target_model = "gemini-2.5-pro" if model_type == "gemini-2.5-pro" else BRAIN_MODEL
         messages = build_gptproto_messages(prompt, visual_frames)
 
         try:
@@ -1003,7 +1152,7 @@ def analyze_video(transcript, model_type, video_path=None):
             print("gptproto 分析错误:", e)
             raise RuntimeError(f"gptproto 分析失败: {e}")
 
-    elif model_type == "tongyi":
+    elif model_type in {"tongyi", "qwen-turbo"}:
         if not DASHSCOPE_KEY:
             raise RuntimeError("未配置 DASHSCOPE_KEY")
         res = requests.post(
@@ -1016,12 +1165,28 @@ def analyze_video(transcript, model_type, video_path=None):
     return "[]"
 
 
+def print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames):
+    print("\n" + "=" * 88)
+    print("视频拆解最终 Prompt")
+    print(f"文件名: {filename}")
+    print(f"模型: {model}")
+    print(f"字幕字符数: {len(transcript or '')}")
+    print(f"关键帧数量: {len(visual_frames or [])}")
+    print(f"Prompt 字符数: {len(prompt or '')}")
+    print("-" * 88)
+    print(prompt)
+    print("=" * 88 + "\n")
+
+
 def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None):
     video_path = str(video_path)
     extract_frames(video_path)
     has_audio = extract_audio(video_path)
     transcript = audio_to_text() if has_audio else "未识别到音频"
-    result = analyze_video(transcript, model, video_path)
+    visual_frames = sample_visual_frames(video_path) if video_path else []
+    prompt = build_analysis_prompt(transcript, visual_frames)
+    print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames)
+    result = analyze_video(transcript, model, video_path, visual_frames=visual_frames, prompt=prompt)
     result = enrich_storyboard_result(result, video_path)
     if replace_analysis_id:
         return update_analysis_record_result(replace_analysis_id, model, result)
@@ -1058,7 +1223,7 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
 async def _analyze_impl(
     file: UploadFile = None,
     video_url: str = Form(None),
-    model: str = Form("gpt4o"),
+    model: str = Form("gpt-4o"),
     async_mode: bool = Form(False)
 ):
     try:
@@ -1116,7 +1281,7 @@ async def _analyze_impl(
 async def analyze(
     file: UploadFile = None,
     video_url: str = Form(None),
-    model: str = Form("gpt4o"),
+    model: str = Form("gpt-4o"),
     async_mode: bool = Form(False)
 ):
     return await _analyze_impl(file=file, video_url=video_url, model=model, async_mode=async_mode)
@@ -1126,7 +1291,7 @@ async def analyze(
 async def analyze_with_api_prefix(
     file: UploadFile = None,
     video_url: str = Form(None),
-    model: str = Form("gpt4o"),
+    model: str = Form("gpt-4o"),
     async_mode: bool = Form(False)
 ):
     return await _analyze_impl(file=file, video_url=video_url, model=model, async_mode=async_mode)
@@ -1143,6 +1308,16 @@ async def analysis_job_detail(job_id: str):
 @app.get("/api/analysis-jobs/{job_id}")
 async def analysis_job_detail_with_api_prefix(job_id: str):
     return await analysis_job_detail(job_id)
+
+
+@app.get("/model-options")
+async def model_options():
+    return {"code": 0, "data": get_available_model_options()}
+
+
+@app.get("/api/model-options")
+async def model_options_with_api_prefix():
+    return await model_options()
 
 
 @app.get("/analyses")

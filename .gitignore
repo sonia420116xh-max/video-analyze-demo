@@ -8,6 +8,7 @@ frames/
 videos/
 storage/
 tmp_test.mp4
+debug_outputs/
 
 # Frontend build output.
 frontend/dist/
