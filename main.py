@@ -12,12 +12,16 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 import openai
 import requests
-from moviepy.editor import VideoFileClip
+try:
+    from moviepy.editor import VideoFileClip
+except ModuleNotFoundError:
+    from moviepy import VideoFileClip
 from PIL import Image
 
 try:
@@ -109,6 +113,10 @@ analysis_jobs_lock = threading.Lock()
 analysis_pipeline_lock = threading.Lock()
 
 
+class AnalysisCancelled(RuntimeError):
+    pass
+
+
 PATTERN_TAXONOMY = """
 内部爆款模式分类体系：
 
@@ -136,6 +144,7 @@ PATTERN_TAXONOMY = """
 - 场景驱动型：围绕出门、约会、上班、旅行、洗护等具体准备场景展开。
 - 情感叙事型：个人困扰、身体变化、外貌焦虑、生活状态或自我改善驱动产品出现。
 - 产品对决型：在个人使用场景中比较不同产品、不同效果或不同选择。
+补充判断：如果是镜前 GRWM POV / 对镜自拍试穿，创作者按正面亮相、侧身/背面转身、版型/洗水/剪裁/尺码/购买信息这样的固定顺序展示单件服装，优先判为“仪式步骤型”，不要创造“穿搭展示型”等体系外小类。
 
 4. 分屏对比
 适用判断：左右分屏、前后对比、有无产品对比、竞品/平替对比、淘汰赛式测试；核心是直观证明差异。
@@ -306,7 +315,8 @@ def normalize_json_text(text):
 def init_db(db_path=DB_PATH):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS analyses (
@@ -347,16 +357,22 @@ def init_db(db_path=DB_PATH):
             """
         )
         conn.commit()
+    finally:
+        conn.close()
 
 
 def _row_to_dict(row):
     return dict(row) if row else None
 
 
+@contextmanager
 def _connect_db(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def parse_result_items(result_json):
@@ -686,15 +702,54 @@ def persist_analysis(video_path, original_filename, model, result_json):
 def update_analysis_job(job_id, **updates):
     with analysis_jobs_lock:
         current = analysis_jobs.setdefault(job_id, {})
+        if current.get("status") == "canceled" and updates.get("status") != "canceled":
+            return sanitize_analysis_job(current)
         current.update(updates)
         current["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return dict(current)
+        return sanitize_analysis_job(current)
 
 
 def get_analysis_job(job_id):
     with analysis_jobs_lock:
         job = analysis_jobs.get(job_id)
-        return dict(job) if job else None
+        return sanitize_analysis_job(job) if job else None
+
+
+def sanitize_analysis_job(job):
+    return {key: value for key, value in dict(job).items() if not key.startswith("_")}
+
+
+def is_terminal_job_status(status):
+    return status in {"completed", "failed", "canceled"}
+
+
+def cancel_analysis_job(job_id):
+    with analysis_jobs_lock:
+        job = analysis_jobs.get(job_id)
+        if not job:
+            return None
+        if is_terminal_job_status(job.get("status")):
+            return sanitize_analysis_job(job)
+
+        cancel_event = job.get("_cancel_event")
+        if cancel_event:
+            cancel_event.set()
+        job["cancel_requested"] = True
+        job["status"] = "canceled"
+        job["message"] = "任务已取消，后台正在停止当前处理"
+        job["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return sanitize_analysis_job(job)
+
+
+def check_analysis_cancelled(job_id):
+    if not job_id:
+        return
+    with analysis_jobs_lock:
+        job = analysis_jobs.get(job_id)
+        cancel_event = job.get("_cancel_event") if job else None
+        canceled = bool(job and (job.get("cancel_requested") or (cancel_event and cancel_event.is_set())))
+    if canceled:
+        raise AnalysisCancelled("任务已取消")
 
 
 def create_analysis_job(filename, model):
@@ -709,6 +764,8 @@ def create_analysis_job(filename, model):
             "message": "任务已提交，等待后台分析",
             "created_at": now,
             "updated_at": now,
+            "cancel_requested": False,
+            "_cancel_event": threading.Event(),
         }
     return job_id
 
@@ -932,6 +989,8 @@ def build_analysis_prompt(transcript, visual_frames=None):
 12. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
 13. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
 
+短视频分镜补充规则：对 12-30 秒的镜前 GRWM POV / 服装试穿短视频，不要因为全片都在展示同一件衣服就合并成 1 个分镜；如果画面或字幕依次出现开场情绪/亮相、多角度转身展示、版型/洗水/剪裁/尺码/购买码/链接等不同转化目的，通常拆成 3-4 个分镜。典型结构是：0-3 秒情绪营销或故事开场 → 中段优惠活动/购买动机或多角度展示 → 后段产品卖点/真实体验/行动号召。镜前 GRWM POV 单品试穿优先判为“GRWM + 产品 / 仪式步骤型”，不要创造“穿搭展示型”等体系外小类。
+
 输出格式：
 [
   {{
@@ -979,6 +1038,7 @@ def build_analysis_prompt(transcript, visual_frames=None):
 - 分镜数量要克制：如果多个连续片段都在围绕同一产品、同一优惠机制、同一试穿反馈或同一行动号召展开，请合并为一个分镜，在 script 字段中保留该阶段的关键原文。
 - 所有分镜的 viral_formula 和 formula_subtype 应保持一致，除非视频明显是混合结构；混合时也要以主类型为准。
 - 不要把某个小类的示例流程当作硬性模板；title/content_tag 必须来自视频真实内容。
+- title 和 content_tag 只能从“全局叙事步骤词库”中选择，严禁输出“多角度展示、转身展示、结束展示、服装试穿与展示、穿搭展示”等动作描述型或自造类型；这些画面动作应写进 scene_description，分镜类型要归一为“情绪营销/优惠活动/产品卖点/真实体验/行动号召”等标准步骤。
 
 字幕内容：
 {transcript}
@@ -1012,6 +1072,69 @@ def normalize_content_tag(item):
         if not item.get("conversion_point"):
             item["conversion_point"] = "通过并列比较建立产品选择理由"
 
+    return item
+
+
+ALLOWED_STORY_STEPS = {
+    "故事开场",
+    "用户痛点",
+    "需求产生",
+    "场景设定",
+    "产品亮相",
+    "产品信息",
+    "产品特写",
+    "使用说明",
+    "功能演示",
+    "产品卖点",
+    "产品差异",
+    "卖点对比",
+    "痛点解决",
+    "产品功效",
+    "效果对比",
+    "真实体验",
+    "使用感受",
+    "适用场景",
+    "适用人群",
+    "情绪营销",
+    "价格促销",
+    "优惠活动",
+    "行动号召",
+}
+
+
+def infer_standard_story_step(item):
+    text = " ".join([
+        str(item.get("title", "")),
+        str(item.get("content_tag", "")),
+        str(item.get("scene_description", "")),
+        str(item.get("script", "")),
+        str(item.get("conversion_point", "")),
+    ]).lower()
+
+    if _keyword_hits(text, ["coupon", "discount", "deal", "sale", "price", "code", "link", "shop", "cart", "购买", "链接", "优惠", "折扣", "促销", "价格"]):
+        return "优惠活动"
+    if _keyword_hits(text, ["vs", "which is better", "compare", "comparison", "winner", "对比", "差异", "哪个更好"]):
+        return "产品差异"
+    if _keyword_hits(text, ["wash", "cut", "fit", "sizing", "size", "denim", "版型", "剪裁", "洗水", "尺码", "腰部", "臀部", "显瘦", "包裹"]):
+        return "产品卖点"
+    if _keyword_hits(text, ["turn", "side", "back", "try on", "mirror", "转身", "侧面", "背面", "试穿", "上身", "多角度"]):
+        return "真实体验"
+    if _keyword_hits(text, ["smile", "excited", "happy", "情绪", "微笑", "开心", "自信", "满意"]):
+        return "情绪营销"
+    return "产品亮相"
+
+
+def normalize_story_step_labels(item):
+    title = str(item.get("title", "")).strip()
+    content_tag = str(item.get("content_tag", "")).strip()
+
+    if content_tag not in ALLOWED_STORY_STEPS:
+        content_tag = ""
+    if title not in ALLOWED_STORY_STEPS:
+        title = content_tag or infer_standard_story_step(item)
+
+    item["title"] = title
+    item["content_tag"] = content_tag or title
     return item
 
 
@@ -1359,9 +1482,41 @@ def normalize_as_unboxing_review(items):
     return items
 
 
+def should_classify_as_grwm_ritual_tryon(items):
+    text = _combined_story_text(items)
+    if not text.strip():
+        return False
+
+    grwm_hits = _keyword_hits(text, [
+        "grwm", "get ready", "mirror", "镜前", "对镜", "穿衣镜", "自拍", "try on", "试穿",
+    ])
+    apparel_hits = _keyword_hits(text, [
+        "牛仔裤", "裤子", "jeans", "pants", "denim", "fit", "版型", "洗水", "剪裁", "穿搭", "服装", "服饰",
+    ])
+    ordered_show_hits = _keyword_hits(text, [
+        "正面", "侧面", "背面", "转身", "多角度", "腰部", "臀部", "尺码", "购买", "链接", "code", "coupon",
+    ])
+
+    return grwm_hits and apparel_hits and ordered_show_hits
+
+
+def normalize_grwm_ritual_tryon(items):
+    reason = "视频以镜前 GRWM POV 试穿为主，按亮相、多角度转身、版型/尺码/购买信息等顺序展示单件服装，属于把产品嵌入个人准备流程的仪式步骤型。"
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("viral_formula") == "GRWM + 产品":
+            item["formula_subtype"] = "仪式步骤型"
+            item["category_reason"] = reason
+    return items
+
+
 def normalize_formula_classification(items):
     if should_classify_as_unboxing_review(items):
         return normalize_as_unboxing_review(items)
+
+    if should_classify_as_grwm_ritual_tryon(items):
+        return normalize_grwm_ritual_tryon(items)
 
     if not should_reclassify_as_alternative_showdown(items):
         return items
@@ -1407,6 +1562,7 @@ def enrich_storyboard_result(result_text, video_path):
         item.setdefault("evidence_frame", "")
         item.setdefault("evidence_timestamp", item.get("start_time", 0))
         normalize_content_tag(item)
+        normalize_story_step_labels(item)
 
     normalize_formula_classification(parsed)
     normalize_marketing_taxonomies(parsed)
@@ -1674,18 +1830,23 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     total_start = time.perf_counter()
     video_path = str(video_path)
     preprocess_start = time.perf_counter()
+    check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "开始抽取临时帧", filename=filename, model=model)
     extract_frames(video_path)
+    check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "开始提取音频", filename=filename)
     has_audio = extract_audio(video_path)
+    check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "音频提取完成", has_audio=has_audio)
     log_analysis_job(job_id, "开始 ASR 转写" if has_audio else "视频无音频，跳过 ASR")
     transcript = audio_to_text() if has_audio else "未识别到音频"
     log_analysis_job(job_id, "ASR 转写完成", transcript_chars=len(transcript or ""))
     log_analysis_job(job_id, "开始采样视觉关键帧")
     visual_frames = sample_visual_frames(video_path) if video_path else []
+    check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "视觉关键帧采样完成", frame_count=len(visual_frames))
     prompt = build_analysis_prompt(transcript, visual_frames)
+    check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "最终 Prompt 构建完成", prompt_chars=len(prompt or ""))
     preprocess_seconds = time.perf_counter() - preprocess_start
     print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames)
@@ -1693,12 +1854,14 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     ai_start = time.perf_counter()
     log_analysis_job(job_id, "开始调用 AI 分析", model=model)
     result = analyze_video(transcript, model, video_path, visual_frames=visual_frames, prompt=prompt)
+    check_analysis_cancelled(job_id)
     ai_seconds = time.perf_counter() - ai_start
     log_analysis_job(job_id, "AI 分析返回", elapsed=format_duration(ai_seconds))
 
     postprocess_start = time.perf_counter()
     log_analysis_job(job_id, "开始后处理结果")
     result = enrich_storyboard_result(result, video_path)
+    check_analysis_cancelled(job_id)
     if replace_analysis_id:
         stored = update_analysis_record_result(replace_analysis_id, model, result)
     else:
@@ -1742,6 +1905,7 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
         log_analysis_job(job_id, "等待分析流水线锁")
         with analysis_pipeline_lock:
             log_analysis_job(job_id, "获得分析流水线锁")
+            check_analysis_cancelled(job_id)
             clean_temp()
             stored = run_analysis_pipeline(video_path, filename, model, replace_analysis_id, job_id=job_id)
             clean_temp()
@@ -1762,6 +1926,9 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
             analysis_id=stored["analysis_id"],
             total=format_duration(stored.get("timing", {}).get("total_seconds", 0)),
         )
+    except AnalysisCancelled as e:
+        log_analysis_job(job_id, "analysis canceled", reason=str(e))
+        update_analysis_job(job_id, status="canceled", message=str(e), cancel_requested=True)
     except Exception as e:
         print("后台分析任务异常:", e)
         log_analysis_job(job_id, "后台分析失败", error=str(e))
@@ -1862,6 +2029,19 @@ async def analysis_job_detail(job_id: str):
 @app.get("/api/analysis-jobs/{job_id}")
 async def analysis_job_detail_with_api_prefix(job_id: str):
     return await analysis_job_detail(job_id)
+
+
+@app.post("/analysis-jobs/{job_id}/cancel")
+async def cancel_analysis_job_endpoint(job_id: str):
+    job = cancel_analysis_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="分析任务不存在或后端已重启")
+    return {"code": 0, "data": job}
+
+
+@app.post("/api/analysis-jobs/{job_id}/cancel")
+async def cancel_analysis_job_with_api_prefix(job_id: str):
+    return await cancel_analysis_job_endpoint(job_id)
 
 
 @app.get("/model-options")

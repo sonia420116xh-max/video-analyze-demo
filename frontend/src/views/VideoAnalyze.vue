@@ -35,6 +35,14 @@
           <el-button type="primary" @click="startAnalyze" :loading="loading" :disabled="!modelType">
             {{ loading ? '后台分析中' : '开始AI拆解' }}
           </el-button>
+          <el-button
+            v-if="canCancelJob"
+            type="danger"
+            plain
+            @click="cancelCurrentJob"
+          >
+            停止生成
+          </el-button>
         </div>
       </header>
 
@@ -309,6 +317,7 @@ const pageTitle = computed(() => {
   return '自动识别爆款公式'
 })
 const jobStatusText = computed(() => {
+  if (jobStatus.value === 'canceled') return '已停止'
   const statusMap = {
     queued: '任务已提交',
     processing: '正在后台分析',
@@ -318,6 +327,7 @@ const jobStatusText = computed(() => {
   return statusMap[jobStatus.value] || '等待任务状态'
 })
 const canReanalyze = computed(() => Boolean(activeAnalysisId.value) && !loading.value && !reanalyzeLoading.value)
+const canCancelJob = computed(() => Boolean(currentJobId.value) && ['queued', 'processing'].includes(jobStatus.value))
 const isActiveReanalysisRunning = computed(() => {
   if (!activeAnalysisId.value) return false
   if (reanalyzingAnalysisId.value !== activeAnalysisId.value) return false
@@ -337,6 +347,7 @@ const setAnalysisStatus = (analysisId, status) => {
 const getAnalysisStatus = (analysisId) => analysisStatusMap.value[analysisId] || 'completed'
 
 const getAnalysisStatusText = (analysisId) => {
+  if (getAnalysisStatus(analysisId) === 'canceled') return '已停止'
   const statusMap = {
     queued: '等待中',
     processing: '进行中',
@@ -352,6 +363,7 @@ const getAnalysisStatusTagType = (analysisId) => {
     processing: 'warning',
     completed: 'success',
     failed: 'danger',
+    canceled: 'info',
   }
   return typeMap[getAnalysisStatus(analysisId)] || 'success'
 }
@@ -598,6 +610,28 @@ const clearJobState = () => {
   }
 }
 
+const cancelCurrentJob = async () => {
+  if (!currentJobId.value) return
+  const jobId = currentJobId.value
+  try {
+    const res = await axios.post(`/api/analysis-jobs/${jobId}/cancel`, null, { timeout: 10000 })
+    const job = res.data.data || {}
+    const affectedAnalysisId = job.replace_analysis_id || job.analysis_id || reanalyzingAnalysisId.value
+    if (affectedAnalysisId) setAnalysisStatus(affectedAnalysisId, 'canceled')
+    jobStatus.value = 'canceled'
+    jobMessage.value = job.message || '已停止生成'
+    loading.value = false
+    reanalyzeLoading.value = false
+    reanalyzingAnalysisId.value = ''
+    clearJobState()
+    ElMessage.success('已停止生成')
+  } catch (err) {
+    console.error('cancel job failed:', err)
+    const detail = err?.response?.data?.detail || err?.message
+    ElMessage.error(detail ? `停止失败：${detail}` : '停止失败')
+  }
+}
+
 let pollTimer = null
 
 const scheduleJobPolling = (jobId, delay = 2500) => {
@@ -618,7 +652,7 @@ const pollJobStatus = async (jobId, manual = false) => {
     jobMessage.value = job.message || ''
     currentFileName.value = job.filename || currentFileName.value
     const affectedAnalysisId = job.replace_analysis_id || job.analysis_id || reanalyzingAnalysisId.value
-    if (affectedAnalysisId && ['queued', 'processing', 'completed', 'failed'].includes(job.status)) {
+    if (affectedAnalysisId && ['queued', 'processing', 'completed', 'failed', 'canceled'].includes(job.status)) {
       setAnalysisStatus(affectedAnalysisId, job.status)
       if (job.replace_analysis_id) reanalyzingAnalysisId.value = job.replace_analysis_id
     }
@@ -641,6 +675,16 @@ const pollJobStatus = async (jobId, manual = false) => {
       reanalyzingAnalysisId.value = ''
       clearJobState()
       ElMessage.error(job.message ? `分析失败：${job.message}` : '分析失败')
+      return
+    }
+
+    if (job.status === 'canceled') {
+      loading.value = false
+      reanalyzeLoading.value = false
+      setAnalysisStatus(affectedAnalysisId, 'canceled')
+      reanalyzingAnalysisId.value = ''
+      clearJobState()
+      ElMessage.info(job.message || '已停止生成')
       return
     }
 

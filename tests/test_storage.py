@@ -303,6 +303,25 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertEqual(updated["status"], "completed")
         self.assertEqual(main.get_analysis_job(job_id)["analysis_id"], "analysis-1")
 
+    def test_cancel_analysis_job_marks_job_canceled_and_hides_internal_event(self):
+        job_id = main.create_analysis_job("large-demo.mp4", "gemini-2.5-pro")
+
+        canceled = main.cancel_analysis_job(job_id)
+
+        self.assertEqual(canceled["status"], "canceled")
+        self.assertTrue(canceled["cancel_requested"])
+        self.assertNotIn("_cancel_event", canceled)
+        self.assertNotIn("_cancel_event", main.get_analysis_job(job_id))
+
+    def test_canceled_analysis_job_is_not_overwritten_by_late_processing_update(self):
+        job_id = main.create_analysis_job("large-demo.mp4", "gemini-2.5-pro")
+        main.cancel_analysis_job(job_id)
+
+        updated = main.update_analysis_job(job_id, status="processing", message="late update")
+
+        self.assertEqual(updated["status"], "canceled")
+        self.assertEqual(main.get_analysis_job(job_id)["status"], "canceled")
+
     def test_prepare_reanalysis_job_copies_saved_video_to_isolated_job_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -503,6 +522,32 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn('"selling_point_angle"', prompt)
         self.assertIn('"golden_3s_hook"', prompt)
         self.assertIn("没有明确命中黄金3秒钩子时", prompt)
+        self.assertIn("12-30 秒的镜前 GRWM POV", prompt)
+        self.assertIn("通常拆成 3-4 个分镜", prompt)
+        self.assertIn("GRWM + 产品 / 仪式步骤型", prompt)
+
+    def test_enrich_normalizes_mirror_grwm_tryon_to_ritual_steps(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 18,
+                "title": "服装试穿与展示",
+                "scene_description": "创作者站在穿衣镜前对镜自拍，穿着浅蓝色牛仔裤，从正面、侧面和背面转身展示版型、腰部贴合和臀部线条，并提到尺码和购买链接。",
+                "script": "画面/字幕摘要: mirror GRWM try on jeans, showing the fit, wash, sizing and code.",
+                "product_category": "服饰",
+                "content_tag": "真实体验",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "穿搭展示型",
+                "category_reason": "整个视频围绕产品试穿和镜中展示展开。",
+            }
+        ], ensure_ascii=False)
+
+        with patch("main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/not-a-real-video.mp4"))
+
+        self.assertEqual(enriched[0]["viral_formula"], "GRWM + 产品")
+        self.assertEqual(enriched[0]["formula_subtype"], "仪式步骤型")
+        self.assertIn("镜前 GRWM POV", enriched[0]["category_reason"])
 
     def test_enrich_adds_selling_point_and_golden_3s_taxonomy(self):
         model_result = json.dumps([
