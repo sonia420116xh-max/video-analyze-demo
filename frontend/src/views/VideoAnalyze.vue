@@ -133,13 +133,19 @@
             <p>{{ jobMessage || '正在重新抽帧、转写并调用 AI 生成新的视频拆解结果。' }}</p>
           </div>
 
-          <div v-if="resultList.length > 0" class="result-head">
+          <div v-if="currentDisplayItems.length > 0" class="result-head">
             <div>
               <p class="eyebrow">爆款公式</p>
               <!-- <h3>{{ formulaName }} / {{ formulaSubtype }}</h3> -->
               <h3>{{ formulaName }}</h3>
               <div class="result-tags">
                 <el-tag size="small" type="success">{{ formulaSubtype }}</el-tag>
+                <el-tag v-if="primarySellingPoint" size="small" type="warning" effect="plain">
+                  卖点角度 {{ primarySellingPoint }}
+                </el-tag>
+                <el-tag v-if="primaryGolden3s" size="small" type="danger" effect="plain">
+                  黄金3秒 {{ primaryGolden3s }}
+                </el-tag>
                 <el-tag v-if="currentAnalysisModel" size="small" type="info" effect="plain">
                   {{ currentAnalysisModel }}
                 </el-tag>
@@ -147,7 +153,7 @@
               <p class="category-reason" v-if="categoryReason">{{ categoryReason }}</p>
             </div>
             <div class="result-actions">
-              <div class="result-count">{{ resultList.length }} 个分镜</div>
+              <div class="result-count">{{ currentDisplayItems.length }} 个分镜</div>
               <el-button
                 size="small"
                 type="primary"
@@ -161,42 +167,86 @@
             </div>
           </div>
 
-          <div v-if="resultList.length > 0" class="story-list">
-            <article
-              class="story-item"
-              v-for="(item, idx) in resultList"
-              :key="`${idx}-${item.start_time}-${item.end_time}`"
-              @click="seekToSegment(item)"
-            >
-              <img
-                v-if="item.image_url"
-                class="shot-thumb"
-                :src="getImageUrl(item.image_url)"
-                :alt="item.title || `分镜 ${idx + 1}`"
-              />
-              <div v-else class="shot-thumb shot-thumb-empty">{{ idx + 1 }}</div>
+          <div v-if="analysisVersions.length > 1" class="version-toolbar">
+            <span>模型结果</span>
+            <el-checkbox-group v-model="selectedCompareModels" size="small" @change="handleCompareModelChange">
+              <el-checkbox-button
+                v-for="version in analysisVersions"
+                :key="version.model"
+                :label="version.model"
+              >
+                {{ version.model }}
+              </el-checkbox-button>
+            </el-checkbox-group>
+          </div>
 
-              <div class="shot-body">
-                <div class="shot-meta">
-                  <span class="time-pill">{{ formatTime(item.start_time) }} - {{ formatTime(item.end_time) }}</span>
-                  <strong>{{ item.title || item.narrative_role || `分镜 ${idx + 1}` }}</strong>
+          <div v-if="currentDisplayItems.length > 0">
+            <div v-if="isCompareMode" class="compare-grid">
+              <section
+                v-for="version in selectedModelVersions"
+                :key="version.model"
+                class="compare-column"
+              >
+                <div class="compare-head">
+                  <strong>{{ version.model }}</strong>
+                  <span>{{ version.shot_count || version.data?.length || 0 }} 个分镜</span>
                 </div>
-
-                <p class="scene-text">{{ item.scene_description }}</p>
-
-                <blockquote class="script-text">
-                  {{ item.script }}
-                </blockquote>
-
-                <div class="tags">
-                  <!-- <el-tag size="small" type="success">{{ item.content_tag || '情感叙事' }}</el-tag>
-                  <el-tag size="small" type="warning">{{ item.shot_type || '镜前特写' }}</el-tag>
-                  <el-tag v-if="item.product_category" size="small" type="info">{{ item.product_category }}</el-tag>
-                  <el-tag v-if="item.evidence_frame" size="small">{{ item.evidence_frame }}</el-tag>
-                  <el-tag size="small">{{ item.visual_tactic || formulaName }}</el-tag> -->
+                <div class="story-list compact">
+                  <article
+                    class="story-item"
+                    v-for="(item, idx) in version.data || []"
+                    :key="`${version.model}-${idx}-${item.start_time}-${item.end_time}`"
+                    @click="seekToSegment(item)"
+                  >
+                    <img
+                      v-if="item.image_url"
+                      class="shot-thumb"
+                      :src="getImageUrl(item.image_url)"
+                      :alt="item.title || `分镜 ${idx + 1}`"
+                    />
+                    <div v-else class="shot-thumb shot-thumb-empty">{{ idx + 1 }}</div>
+                    <div class="shot-body">
+                      <div class="shot-meta">
+                        <span class="time-pill">{{ formatTime(item.start_time) }} - {{ formatTime(item.end_time) }}</span>
+                        <strong>{{ item.title || item.narrative_role || `分镜 ${idx + 1}` }}</strong>
+                      </div>
+                      <p class="scene-text">{{ item.scene_description }}</p>
+                      <blockquote class="script-text">{{ item.script }}</blockquote>
+                    </div>
+                  </article>
                 </div>
-              </div>
-            </article>
+              </section>
+            </div>
+
+            <div v-else class="story-list">
+              <article
+                class="story-item"
+                v-for="(item, idx) in currentDisplayItems"
+                :key="`${idx}-${item.start_time}-${item.end_time}`"
+                @click="seekToSegment(item)"
+              >
+                <img
+                  v-if="item.image_url"
+                  class="shot-thumb"
+                  :src="getImageUrl(item.image_url)"
+                  :alt="item.title || `分镜 ${idx + 1}`"
+                />
+                <div v-else class="shot-thumb shot-thumb-empty">{{ idx + 1 }}</div>
+
+                <div class="shot-body">
+                  <div class="shot-meta">
+                    <span class="time-pill">{{ formatTime(item.start_time) }} - {{ formatTime(item.end_time) }}</span>
+                    <strong>{{ item.title || item.narrative_role || `分镜 ${idx + 1}` }}</strong>
+                  </div>
+
+                  <p class="scene-text">{{ item.scene_description }}</p>
+
+                  <blockquote class="script-text">
+                    {{ item.script }}
+                  </blockquote>
+                </div>
+              </article>
+            </div>
           </div>
 
           <div v-else class="empty-result">
@@ -226,6 +276,8 @@ const currentJobId = ref('')
 const jobStatus = ref('')
 const jobMessage = ref('')
 const resultList = ref([])
+const analysisVersions = ref([])
+const selectedCompareModels = ref([])
 const historyList = ref([])
 const videoPreviewUrl = ref('')
 const isLocalPreview = ref(false)
@@ -238,12 +290,22 @@ const analysisVersion = ref(Date.now())
 const videoRef = ref(null)
 let currentFile = null
 
-const formulaName = computed(() => resultList.value[0]?.viral_formula || '自动识别模式')
-const formulaSubtype = computed(() => resultList.value[0]?.formula_subtype || '自动识别小类')
-const categoryReason = computed(() => resultList.value[0]?.category_reason || '')
+const getVersionByModel = (model) => analysisVersions.value.find((version) => version.model === model)
+const activeVersion = computed(() => getVersionByModel(currentAnalysisModel.value))
+const selectedModelVersions = computed(() => selectedCompareModels.value
+  .map((model) => getVersionByModel(model))
+  .filter(Boolean))
+const currentDisplayVersion = computed(() => selectedModelVersions.value[0] || activeVersion.value || null)
+const currentDisplayItems = computed(() => currentDisplayVersion.value?.data || resultList.value)
+const isCompareMode = computed(() => selectedModelVersions.value.length >= 2)
+const formulaName = computed(() => currentDisplayItems.value[0]?.viral_formula || '自动识别模式')
+const formulaSubtype = computed(() => currentDisplayItems.value[0]?.formula_subtype || '自动识别小类')
+const categoryReason = computed(() => currentDisplayItems.value[0]?.category_reason || '')
+const primarySellingPoint = computed(() => formatSellingPoint(currentDisplayItems.value[0]))
+const primaryGolden3s = computed(() => formatGolden3s(currentDisplayItems.value[0]))
 const pageTitle = computed(() => {
   // if (resultList.value.length > 0) return `${formulaName.value} / ${formulaSubtype.value}`
-  if (resultList.value.length > 0) return `${formulaName.value}`
+  if (currentDisplayItems.value.length > 0) return `${formulaName.value}`
   return '自动识别爆款公式'
 })
 const jobStatusText = computed(() => {
@@ -343,6 +405,22 @@ const formatTime = (value) => {
 
 const getImageUrl = (url) => `${url}?v=${analysisVersion.value}`
 
+const formatTaxonomyLabel = (primary, subtype) => {
+  if (!primary && !subtype) return ''
+  if (!subtype || subtype === primary) return primary || subtype
+  return `${primary} · ${subtype}`
+}
+
+const formatSellingPoint = (item) => {
+  if (!item) return ''
+  return formatTaxonomyLabel(item.selling_point_angle, item.selling_point_subtype)
+}
+
+const formatGolden3s = (item) => {
+  if (!item) return ''
+  return formatTaxonomyLabel(item.golden_3s_hook, item.golden_3s_subtype)
+}
+
 const formatCreatedAt = (value) => {
   if (!value) return ''
   const date = new Date(value)
@@ -368,10 +446,45 @@ const handleFileChange = (file) => {
   currentFileName.value = file.name
   fileList.value = [file]
   resultList.value = []
+  analysisVersions.value = []
+  selectedCompareModels.value = []
   activeAnalysisId.value = ''
   clearJobState()
 
   setVideoPreview(URL.createObjectURL(file.raw), true)
+}
+
+const applyAnalysisDetail = (detail) => {
+  resultList.value = detail.data || []
+  analysisVersions.value = detail.versions?.length
+    ? detail.versions
+    : [{
+        model: detail.model || '',
+        data: detail.data || [],
+        shot_count: detail.data?.length || 0,
+        is_active: true,
+      }]
+  currentFileName.value = detail.filename || ''
+  activeAnalysisId.value = detail.id
+  currentAnalysisModel.value = detail.model || ''
+  selectedCompareModels.value = detail.model ? [detail.model] : []
+  if (detail.model && isModelAvailable(detail.model)) {
+    modelType.value = detail.model
+  }
+  currentFile = null
+  fileList.value = []
+  setVideoPreview(detail.video_url || '', false)
+  analysisVersion.value = Date.now()
+}
+
+const handleCompareModelChange = (models) => {
+  if (models.length === 0) {
+    selectedCompareModels.value = currentAnalysisModel.value ? [currentAnalysisModel.value] : []
+    return
+  }
+  if (models.length > 2) {
+    selectedCompareModels.value = models.slice(-2)
+  }
 }
 
 const seekToSegment = (item) => {
@@ -426,7 +539,7 @@ const reanalyzeCurrent = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确定重新拆解「${currentFileName.value || '当前视频'}」吗？确认后会重新生成分镜结果，并替换当前历史记录。`,
+      `确定用 ${modelType.value} 重新拆解「${currentFileName.value || '当前视频'}」吗？确认后会更新该模型的最新结果，并默认展示本次结果。`,
       '重新拆解确认',
       {
         confirmButtonText: '确认重新拆解',
@@ -459,7 +572,7 @@ const reanalyzeCurrent = async () => {
     jobMessage.value = res.data.msg || '重新拆解任务已提交，后台分析中'
     if (!currentJobId.value) throw new Error('后端未返回任务ID')
     localStorage.setItem('videoAnalyzePendingJobId', currentJobId.value)
-    ElMessage.success('已提交重新拆解任务，完成后会替换当前结果')
+    ElMessage.success('已提交重新拆解任务，完成后会更新该模型版本')
     scheduleJobPolling(currentJobId.value, 1200)
   } catch (err) {
     console.error('reanalyze failed:', err)
@@ -511,15 +624,12 @@ const pollJobStatus = async (jobId, manual = false) => {
     }
 
     if (job.status === 'completed') {
-      resultList.value = JSON.parse(normalizeJsonText(job.data || '[]'))
-      activeAnalysisId.value = job.analysis_id || ''
-      currentAnalysisModel.value = job.model || modelType.value || ''
-      setAnalysisStatus(activeAnalysisId.value, 'completed')
+      const completedAnalysisId = job.analysis_id || ''
+      setAnalysisStatus(completedAnalysisId, 'completed')
       reanalyzingAnalysisId.value = ''
-      if (job.video_url) setVideoPreview(job.video_url, false)
-      analysisVersion.value = Date.now()
       loading.value = false
       await loadHistory()
+      if (completedAnalysisId) await loadAnalysis(completedAnalysisId)
       clearJobState()
       ElMessage.success('拆解完成！')
       return
@@ -597,17 +707,7 @@ const loadAnalysis = async (id) => {
     loading.value = false
     const res = await axios.get(`/api/analyses/${id}`, { timeout: 10000 })
     const detail = res.data.data
-    resultList.value = detail.data || []
-    currentFileName.value = detail.filename || ''
-    activeAnalysisId.value = detail.id
-    currentAnalysisModel.value = detail.model || ''
-    if (detail.model && isModelAvailable(detail.model)) {
-      modelType.value = detail.model
-    }
-    currentFile = null
-    fileList.value = []
-    setVideoPreview(detail.video_url || '', false)
-    analysisVersion.value = Date.now()
+    applyAnalysisDetail(detail)
   } catch (err) {
     console.error('load analysis failed:', err)
     const detail = err?.response?.data?.detail || err?.message
@@ -622,6 +722,8 @@ const handleHistorySelect = (item) => {
 
 const clearCurrentAnalysis = () => {
   resultList.value = []
+  analysisVersions.value = []
+  selectedCompareModels.value = []
   activeAnalysisId.value = ''
   currentAnalysisModel.value = ''
   currentFileName.value = ''
@@ -1002,6 +1104,54 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+.version-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+}
+
+.version-toolbar span {
+  color: #667085;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
+}
+
+.compare-column {
+  min-width: 0;
+  padding: 14px;
+  background: rgba(248, 250, 252, 0.78);
+  border: 1px solid #dfe6f0;
+  border-radius: 8px;
+}
+
+.compare-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: #101828;
+}
+
+.compare-head span {
+  color: #667085;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .story-list {
   display: flex;
   flex-direction: column;
@@ -1020,6 +1170,15 @@ onBeforeUnmount(() => {
 .story-item:first-child {
   border-top: 0;
   padding-top: 0;
+}
+
+.story-list.compact .story-item {
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.story-list.compact .shot-thumb {
+  width: 48px;
 }
 
 .shot-thumb {
@@ -1107,6 +1266,10 @@ onBeforeUnmount(() => {
   }
 
   .analysis-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .compare-grid {
     grid-template-columns: 1fr;
   }
 

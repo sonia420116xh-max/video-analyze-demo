@@ -188,8 +188,66 @@ class AnalysisStorageTest(unittest.TestCase):
             self.assertEqual(detail["model"], "gpt4o")
             self.assertEqual(detail["shot_count"], 1)
             self.assertEqual(detail["data"][0]["formula_subtype"], "开箱评测型")
-            self.assertEqual(detail["data"][0]["image_url"], "/storage/frames/analysis-1/shot_01.jpg")
-            self.assertEqual((stored_frames / "analysis-1" / "shot_01.jpg").read_bytes(), b"new frame")
+            self.assertEqual(detail["data"][0]["image_url"], "/storage/frames/analysis-1/gpt4o/shot_01.jpg")
+            self.assertEqual((stored_frames / "analysis-1" / "gpt4o" / "shot_01.jpg").read_bytes(), b"new frame")
+
+    def test_update_analysis_record_preserves_latest_result_per_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "analysis.db"
+            stored_frames = root / "stored-frames"
+            temp_frames = root / "temp-frames"
+            stored_frames.mkdir()
+            temp_frames.mkdir()
+            (temp_frames / "shot_01.jpg").write_bytes(b"gpt frame")
+            main.init_db(db_path)
+            main.save_analysis_record(
+                {
+                    "id": "analysis-1",
+                    "filename": "demo.mp4",
+                    "model": "gemini-2.5-pro",
+                    "video_path": str(root / "demo.mp4"),
+                    "video_url": "/storage/videos/demo.mp4",
+                    "result_json": json.dumps([
+                        {
+                            "viral_formula": "日常 Vlog",
+                            "formula_subtype": "日常碎片型",
+                            "category_reason": "gemini 版本",
+                        }
+                    ], ensure_ascii=False),
+                    "formula": "日常 Vlog",
+                    "subtype": "日常碎片型",
+                    "category_reason": "gemini 版本",
+                    "created_at": "2026-05-11T10:00:00+08:00",
+                },
+                db_path,
+            )
+
+            updated = main.update_analysis_record_result(
+                "analysis-1",
+                "gpt-4o",
+                json.dumps([
+                    {
+                        "viral_formula": "分屏对比",
+                        "formula_subtype": "平替对决型",
+                        "category_reason": "gpt 版本",
+                        "image_url": "/frames/shot_01.jpg",
+                    }
+                ], ensure_ascii=False),
+                db_path=db_path,
+                stored_frame_dir=stored_frames,
+                temp_frame_dir=temp_frames,
+            )
+
+            self.assertEqual(updated["analysis_id"], "analysis-1")
+            detail = main.fetch_analysis_detail("analysis-1", db_path)
+            self.assertEqual(detail["model"], "gpt-4o")
+            self.assertEqual(detail["data"][0]["formula_subtype"], "平替对决型")
+            self.assertEqual([version["model"] for version in detail["versions"]], ["gpt-4o", "gemini-2.5-pro"])
+            version_by_model = {version["model"]: version for version in detail["versions"]}
+            self.assertEqual(version_by_model["gemini-2.5-pro"]["data"][0]["formula_subtype"], "日常碎片型")
+            self.assertEqual(version_by_model["gpt-4o"]["data"][0]["image_url"], "/storage/frames/analysis-1/gpt-4o/shot_01.jpg")
+            self.assertEqual((stored_frames / "analysis-1" / "gpt-4o" / "shot_01.jpg").read_bytes(), b"gpt frame")
 
     def test_delete_analysis_record_removes_db_row_and_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,6 +498,72 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("不要逐句切分", prompt)
         self.assertIn("scene_description 至少 30 个中文字符", prompt)
         self.assertIn("script 需要覆盖该段完整语义", prompt)
+        self.assertIn("卖点角度分类体系", prompt)
+        self.assertIn("黄金3秒钩子分类体系", prompt)
+        self.assertIn('"selling_point_angle"', prompt)
+        self.assertIn('"golden_3s_hook"', prompt)
+        self.assertIn("没有明确命中黄金3秒钩子时", prompt)
+
+    def test_enrich_adds_selling_point_and_golden_3s_taxonomy(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 3,
+                "title": "用户痛点",
+                "scene_description": "画面聚焦地板和墙角大量宠物毛发，字幕用 Got shedding pets? 直接提问。",
+                "script": "Got shedding pets? listen if your house is a zoo with pet hair like mine.",
+                "viral_formula": "第一人称视角",
+                "formula_subtype": "困境解决型",
+            },
+            {
+                "start_time": 3,
+                "end_time": 12,
+                "title": "产品功效",
+                "scene_description": "空气净化器被放在毛发环境里，口播强调会把漂浮毛发捕捉住。",
+                "script": "this purifier will capture hair at a thin air.",
+                "viral_formula": "第一人称视角",
+                "formula_subtype": "困境解决型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/not-a-real-video.mp4"))
+
+        self.assertTrue(all(item["selling_point_angle"] == "展示效果" for item in enriched))
+        self.assertTrue(all(item["selling_point_subtype"] == "实时演示" for item in enriched))
+        self.assertTrue(all(item["golden_3s_hook"] == "提问式" for item in enriched))
+        self.assertTrue(all(item["golden_3s_subtype"] == "痛点提问" for item in enriched))
+
+    def test_enrich_leaves_golden_3s_empty_when_opening_has_no_clear_hook(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 5,
+                "title": "场景设定",
+                "scene_description": "创作者站在卧室镜子前整理衣服，画面自然展示一件日常穿搭单品。",
+                "script": "Today I'm getting ready and showing this outfit.",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "场景驱动型",
+            },
+            {
+                "start_time": 5,
+                "end_time": 18,
+                "title": "产品卖点",
+                "scene_description": "创作者转身展示上身效果和整体版型，强调日常穿搭的舒适和审美风格。",
+                "script": "It is so comfy and goes with everything.",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "场景驱动型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/not-a-real-video.mp4"))
+
+        self.assertTrue(all(item["selling_point_angle"] for item in enriched))
+        self.assertTrue(all(item["selling_point_subtype"] for item in enriched))
+        self.assertTrue(all(item["golden_3s_hook"] == "" for item in enriched))
+        self.assertTrue(all(item["golden_3s_subtype"] == "" for item in enriched))
+        self.assertTrue(all(item["golden_3s_reason"] == "" for item in enriched))
 
 
 if __name__ == "__main__":

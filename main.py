@@ -179,6 +179,103 @@ PATTERN_TAXONOMY = """
 - 行动号召：引导点击链接、购物车、下方链接、评论区、主页等。
 """
 
+MARKETING_TACTIC_TAXONOMY = """
+卖点角度分类体系：
+这些角度用于判断视频主要用什么购买理由说服观众，必须选择一个主角度和一个小类。
+1. 专家背书
+- 从业者内幕：在职专业人士、行业人士或真实从业者揭露自己私下会用什么。
+- 专业背书：持有资质的医生、营养师、教练、技师、达人测评人等推荐或解释。
+- 机构认证：官方认证、实验室报告、监管批准、临床数据、专利或检测报告建立可信度。
+- 反向信任：先批评热门产品、行业误区或夸大宣传，再推荐当前产品建立信任。
+
+2. 展示效果
+- 实时演示：在镜头前实时展示产品效果，强调无剪切、无编辑、眼见为实。
+- 对照测试：同时测试产品与对照组、竞品、旧方法或错误方法，直观看出差异。
+- 前后时间线：通过使用前后、多个时间节点或连续变化证明效果积累。
+- 个人蜕变故事：讲述产品如何改变创作者生活、状态、外貌或体验。
+- 用户证言集：汇总多条用户评价、评分、评论区反馈或购买数据作为社会证明。
+- 数据证明：使用具体数字、实验室结果、临床数据、续航时长或性能指标证明有效。
+
+3. 轻松便捷
+- 免决策：把产品定位为唯一明显选择，终结选择疲劳或复杂挑选。
+- 随时随地：展示产品在旅行、通勤、户外、车内、包里等非理想场所也能用。
+- 零门槛：证明任何人无需技能、经验或复杂安装也能成功使用。
+- 省时间：强调几秒、几分钟、快速完成或替代长流程。
+- 省步骤：展示一个简单动作替代多个步骤、多个工具或繁琐准备。
+
+4. 制造紧迫感
+- 库存警告：产品即将售罄、此前已售罄、刚补货、库存有限或快没了。
+- 限时折扣：即将过期的折扣、coupon、deal、today only、right now 等促销时效。
+- 渠道独占：强调只有 TikTok Shop、直播间、某渠道或当前链接可以买到。
+- 社证加速：用近期高购买量、评论区催促、爆单、榜单等制造跟风压力。
+
+5. 天然安全
+- 成分透明：精确列出包含和不包含的成分，如天然、有机、无添加、无酒精、低糖。
+- 敏感群体安全：证明产品对儿童、婴儿、宠物、敏感肌、孕妇或家庭环境安全。
+- 安全恐吓：警告竞品、旧方法或常见成分里的隐藏危险，再引出当前产品。
+- 低负担安心：强调无毒、低刺激、环保、食品级、纯棉、clean ingredients 等低风险。
+
+6. 价格优势
+- 隐性成本曝光：揭示观众在无效替代品、旧方法、耗材或错误购买上浪费了多少钱。
+- 替代价值：展示一个产品替代多个昂贵物品、多个工具或多次服务，计算总节省金额。
+- 日均成本拆解：把总价拆成日均、每次、每份、每件或 per serving 的小成本。
+- 平替发现：把发现平价替代品、dupe、alternative 包装成寻宝式胜利。
+- 直接比价：把两个产品、品牌或方案与价格标签并排展示，证明更低价格获得相似品质。
+
+7. 贩卖生活方式
+- 圈层标识：把产品包装为属于某个社群、风格圈层、亚文化或人群身份的标识。
+- 理想自我投射：把产品与观众想成为的人、状态、身材、风格或生活秩序连接起来。
+- 送礼叙事：把产品定位为节日、关系、家庭、朋友或伴侣场景里的完美礼物。
+- 场景代入：将产品自然嵌入令人向往的生活场景，如庭院、卧室、旅行、派对、通勤。
+- 文化认同：将产品与流行美学、TikTok 趋势、亚文化、季节氛围或文化运动关联。
+- 审美升级：把产品包装成个人审美、居家氛围、穿搭品味或生活质感的升级。
+
+黄金3秒钩子分类体系：
+这些钩子只根据视频开头约 0-3 秒或最早分镜判断。并非每条爆款视频都有明确黄金3秒；只有开头存在强钩子时才选择主钩子和小类，没有明确命中时 golden_3s_* 字段留空。
+1. 提问式
+- 痛点提问：直接问观众是否遇到某个困扰，例如 Got shedding pets?
+- 好奇提问：用“你知道吗/为什么/有没有发现”制造信息缺口。
+- 比价追问：用 Which is better、X vs Y、贵价 vs 平价等便宜选项对比昂贵选项。
+- 成本提问：追问真实花费、单次成本、总价或浪费多少钱，触发价格敏感。
+- 共鸣提问：追问观众日常是否也经历某个烦恼、尴尬、需求或生活场景。
+- 从众提问：用“为什么所有人都在做/买/聊 X”触发错失恐惧或社交好奇。
+- 场景驱动型：用特定场景里的问题开场，例如宠物家庭、夏日庭院、通勤、健身、浴室清洁。
+
+2. 挑战式
+- 悬念验证：以“这个真的有用吗？”“我来试试看”的框架制造不确定感。
+- 潮流参与：加入观众能立即认出的病毒式趋势、音乐、格式或热门挑战。
+- 极限测试：将产品置于极端、荒谬、高压力或高难度条件下测试耐久和效果。
+- 参与邀请：邀请观众猜测结果、一起见证、评论选择或接受挑战。
+- 故事悬念：以个人危机、转折点、失败经历或未揭晓结果开场。
+- 场景还原：还原观众每天经历的真实生活场景，让人想看解决过程。
+
+3. 秘诀/技巧
+- 避坑技巧：Learn from my mistakes、别踩坑、我早知道就好了。
+- 省钱秘笈：隐藏折扣、童码/平替/购买路径、怎么更便宜买。
+- 权威对抗：声称专家、品牌、平台或权威机构没有公开某个重要信息。
+- 圈内信息：承诺提供只有行业内部人士、老用户或懂行的人才知道的信息。
+- 捷径承诺：承诺用更快、更省事、更少步骤的方法实现某个结果。
+- 稀缺框架：声称只有少数人知道、很少人会说、别让太多人知道。
+- 生活妙招：以编号技巧清单、实用 hack、便宜好物清单或快速做法开场。
+
+4. 震撼数据
+- 逆认知数据：用数据直接反驳大众观点、常见误区或直觉判断。
+- 结果前置：开头先抛出最终结果数字或巨大变化，再解释产品如何做到。
+- 大数锚定：用销售额、播放量、购买人数、库存量、评论量等规模数字建立冲击。
+- 百分比冲击：用百分比、倍数、提升/下降比例证明效果或价值。
+- 时间线震撼：把惊人效果压缩在极短时间框架内展示，如几秒、几分钟、几天。
+- 对比冲击：将数字与意想不到的参照物对比，放大价值差异。
+
+5. 争议式
+- 立场对抗：以争议性个人观点、unpopular opinion、I said what I said 迫使观众选边站。
+- 价格挑衅：用便宜选项挑战昂贵选项，暗示效果一样或更值得买。
+- 情绪挑衅：以可见的沮丧、愤怒、恼火、吐槽或强烈反应开场。
+- 槽点揭露：指出热门产品、品牌、做法或旧方案的具体缺陷。
+- 颠覆认知：直接反驳一个广泛接受的观点、常见做法或行业话术。
+- 冲突叙事：用两方观点、两个选择、踩雷到真香等矛盾推动观看。
+- 禁忌揭秘：承诺揭露行业、品牌或平台对消费者隐瞒的信息。
+"""
+
 
 def normalize_json_text(text):
     if not isinstance(text, str):
@@ -226,6 +323,29 @@ def init_db(db_path=DB_PATH):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_versions (
+                analysis_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                formula TEXT,
+                subtype TEXT,
+                category_reason TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (analysis_id, model)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO analysis_versions (
+                analysis_id, model, result_json, formula, subtype, category_reason, created_at
+            )
+            SELECT id, model, result_json, formula, subtype, category_reason, created_at
+            FROM analyses
+            """
+        )
         conn.commit()
 
 
@@ -266,11 +386,38 @@ def save_analysis_record(record, db_path=DB_PATH):
             """,
             record,
         )
+        save_analysis_version(conn, record["id"], record["model"], record)
         conn.commit()
 
 
-def store_result_frame_images(analysis_id, items, stored_frame_dir=STORED_FRAME_DIR, temp_frame_dir=TEMP_FRAME_DIR):
-    analysis_frame_dir = Path(stored_frame_dir) / analysis_id
+def save_analysis_version(conn, analysis_id, model, record):
+    conn.execute(
+        """
+        INSERT INTO analysis_versions (
+            analysis_id, model, result_json, formula, subtype, category_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(analysis_id, model) DO UPDATE SET
+            result_json = excluded.result_json,
+            formula = excluded.formula,
+            subtype = excluded.subtype,
+            category_reason = excluded.category_reason,
+            created_at = excluded.created_at
+        """,
+        (
+            analysis_id,
+            model,
+            record.get("result_json", "[]"),
+            record.get("formula", ""),
+            record.get("subtype", ""),
+            record.get("category_reason", ""),
+            record.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
+def store_result_frame_images(analysis_id, items, stored_frame_dir=STORED_FRAME_DIR, temp_frame_dir=TEMP_FRAME_DIR, frame_scope=None):
+    frame_scope = frame_scope or analysis_id
+    analysis_frame_dir = Path(stored_frame_dir) / frame_scope
     if analysis_frame_dir.exists():
         shutil.rmtree(analysis_frame_dir, ignore_errors=True)
     analysis_frame_dir.mkdir(parents=True, exist_ok=True)
@@ -287,7 +434,7 @@ def store_result_frame_images(analysis_id, items, stored_frame_dir=STORED_FRAME_
         stored_frame_path = analysis_frame_dir / frame_name
         if temp_frame_path.exists():
             shutil.copy2(temp_frame_path, stored_frame_path)
-            item["image_url"] = f"/storage/frames/{analysis_id}/{frame_name}"
+            item["image_url"] = f"/storage/frames/{frame_scope}/{frame_name}"
 
     return items
 
@@ -305,10 +452,20 @@ def update_analysis_record_result(
         raise ValueError("分析记录不存在")
 
     items = parse_result_items(result_json)
-    store_result_frame_images(analysis_id, items, stored_frame_dir, temp_frame_dir)
+    frame_scope = f"{analysis_id}/{safe_storage_key(model)}"
+    store_result_frame_images(analysis_id, items, stored_frame_dir, temp_frame_dir, frame_scope=frame_scope)
     normalized_result_json = json.dumps(items, ensure_ascii=False)
     first_item = next((item for item in items if isinstance(item, dict)), {})
+    created_at = datetime.now(timezone.utc).isoformat()
     with _connect_db(db_path) as conn:
+        version_record = {
+            "result_json": normalized_result_json,
+            "formula": first_item.get("viral_formula", ""),
+            "subtype": first_item.get("formula_subtype", ""),
+            "category_reason": first_item.get("category_reason", ""),
+            "created_at": created_at,
+        }
+        save_analysis_version(conn, analysis_id, model, version_record)
         conn.execute(
             """
             UPDATE analyses
@@ -326,7 +483,7 @@ def update_analysis_record_result(
                 first_item.get("viral_formula", ""),
                 first_item.get("formula_subtype", ""),
                 first_item.get("category_reason", ""),
-                datetime.now(timezone.utc).isoformat(),
+                created_at,
                 analysis_id,
             ),
         )
@@ -345,6 +502,7 @@ def delete_analysis_record(analysis_id, db_path=DB_PATH, stored_frame_dir=STORED
         return False
 
     with _connect_db(db_path) as conn:
+        conn.execute("DELETE FROM analysis_versions WHERE analysis_id = ?", (analysis_id,))
         conn.execute("DELETE FROM analyses WHERE id = ?", (analysis_id,))
         conn.commit()
 
@@ -374,11 +532,26 @@ def fetch_analysis_list(db_path=DB_PATH):
             ORDER BY created_at DESC
             """
         ).fetchall()
+        version_rows = conn.execute(
+            """
+            SELECT analysis_id, model
+            FROM analysis_versions
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+    models_by_analysis = {}
+    for row in version_rows:
+        models_by_analysis.setdefault(row["analysis_id"], [])
+        if row["model"] not in models_by_analysis[row["analysis_id"]]:
+            models_by_analysis[row["analysis_id"]].append(row["model"])
 
     records = []
     for row in rows:
         record = _row_to_dict(row)
         record["shot_count"] = len(parse_result_items(record.pop("result_json", "[]")))
+        record["models"] = models_by_analysis.get(record["id"], [record["model"]])
+        record["model_count"] = len(record["models"])
         records.append(record)
     return records
 
@@ -395,6 +568,15 @@ def fetch_analysis_detail(analysis_id, db_path=DB_PATH):
             """,
             (analysis_id,),
         ).fetchone()
+        version_rows = conn.execute(
+            """
+            SELECT model, result_json, formula, subtype, category_reason, created_at
+            FROM analysis_versions
+            WHERE analysis_id = ?
+            ORDER BY created_at DESC
+            """,
+            (analysis_id,),
+        ).fetchall()
 
     record = _row_to_dict(row)
     if not record:
@@ -402,6 +584,29 @@ def fetch_analysis_detail(analysis_id, db_path=DB_PATH):
 
     record["data"] = parse_result_items(record.pop("result_json", "[]"))
     record["shot_count"] = len(record["data"])
+    versions = []
+    for version_row in version_rows:
+        version = _row_to_dict(version_row)
+        version["data"] = parse_result_items(version.pop("result_json", "[]"))
+        version["shot_count"] = len(version["data"])
+        version["is_active"] = version["model"] == record["model"]
+        versions.append(version)
+
+    if not versions:
+        versions = [
+            {
+                "model": record["model"],
+                "formula": record.get("formula", ""),
+                "subtype": record.get("subtype", ""),
+                "category_reason": record.get("category_reason", ""),
+                "created_at": record.get("created_at", ""),
+                "data": record["data"],
+                "shot_count": record["shot_count"],
+                "is_active": True,
+            }
+        ]
+
+    record["versions"] = versions
     return record
 
 
@@ -411,6 +616,10 @@ def safe_filename(filename):
     safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "video"
     safe_suffix = re.sub(r"[^A-Za-z0-9.]+", "", suffix) or ".mp4"
     return f"{safe_stem}{safe_suffix}"
+
+
+def safe_storage_key(value):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "default")).strip("._") or "default"
 
 
 def get_model_api_key(key_name):
@@ -448,7 +657,7 @@ def persist_analysis(video_path, original_filename, model, result_json):
     shutil.copy2(video_path, stored_video_path)
 
     items = parse_result_items(result_json)
-    store_result_frame_images(analysis_id, items)
+    store_result_frame_images(analysis_id, items, frame_scope=f"{analysis_id}/{safe_storage_key(model)}")
 
     normalized_result_json = json.dumps(items, ensure_ascii=False)
     first_item = next((item for item in items if isinstance(item, dict)), {})
@@ -706,6 +915,8 @@ def build_analysis_prompt(transcript, visual_frames=None):
 
 {PATTERN_TAXONOMY}
 
+{MARKETING_TACTIC_TAXONOMY}
+
 分类判断规则：
 1. 先判断视频主导表达方式，而不是单句台词。优先看：产品如何出场、是否真人亲测、是否开箱、是否分屏/前后对比、是否生活流叙事、是否第一人称沉浸演示。
 2. 如果同时命中多个类型，选择贯穿全片最多、承担转化最强的那个作为 viral_formula。
@@ -718,6 +929,8 @@ def build_analysis_prompt(transcript, visual_frames=None):
 9. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
 10. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
 11. 同一品牌内的童码/成人码、不同尺码、不同颜色、sale 折扣、cheaper 购买技巧属于开箱 haul 或产品测评中的购买信息，不是“平替对决型”。只有出现两个品牌、两个产品、贵价 vs 平替、dupe/alternative 或明确竞品对照时，才允许判为平替对决型。
+12. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
+13. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
 
 输出格式：
 [
@@ -735,6 +948,12 @@ def build_analysis_prompt(transcript, visual_frames=None):
     "viral_formula": "第一人称视角/开箱 / ASMR/GRWM + 产品/分屏对比/日常 Vlog",
     "formula_subtype": "对应大类下的小类",
     "category_reason": "为什么判定为这个大类和小类，简洁说明",
+    "selling_point_angle": "专家背书/展示效果/轻松便捷/制造紧迫感/天然安全/价格优势/贩卖生活方式",
+    "selling_point_subtype": "对应卖点角度下的小类",
+    "selling_point_reason": "为什么判定为这个卖点角度，结合画面或口播证据",
+    "golden_3s_hook": "提问式/挑战式/秘诀/技巧/震撼数据/争议式；没有明确命中则为空字符串",
+    "golden_3s_subtype": "对应黄金3秒钩子下的小类；没有明确命中则为空字符串",
+    "golden_3s_reason": "为什么判定为这个开头钩子，只引用开头0-3秒或最早分镜证据；没有明确命中则为空字符串",
     "visual_tactic": "该段使用的视觉手法，例如手持POV/开箱特写/镜前真人实测/左右分屏/生活流植入",
     "conversion_point": "这一段承担的转化作用"
   }}
@@ -749,6 +968,8 @@ def build_analysis_prompt(transcript, visual_frames=None):
 - scene_description 至少 30 个中文字符，要同时写清楚人物动作、商品状态/款式、镜头关系，以及这一段在爆款叙事中的作用；不要只写“展示产品”“创作者介绍商品”这种泛描述。
 - script 需要覆盖该段完整语义。若同一时间段有多句口播，请合并保留关键原文；如果是画面摘要，也要写清楚画面里发生的具体动作。
 - 每个分镜的 conversion_point 必须具体到“为什么让用户更想买/更信任/更省钱/更理解差异”，不要写空泛的“促进转化”。
+- selling_point_angle 和 selling_point_subtype 必须严格从“卖点角度分类体系”选择；selling_point_reason 要说明它解决的是信任、效果、省事、紧迫、安全、省钱还是生活方式想象。
+- golden_3s_hook 和 golden_3s_subtype 只有在开头存在明确钩子时才从“黄金3秒钩子分类体系”选择；如果只是普通场景铺垫、产品自然出现、平铺直叙或无法判断，三个 golden_3s_* 字段都留空。golden_3s_reason 只能依据开头约 0-3 秒或最早分镜，不能引用后半段内容。
 - content_tag 以该段核心转化作用为准。只要该段提到便宜购买方法、优惠、折扣、deal、sale、coupon、price、save、link、shop、cart、购买路径或下单引导，即使画面里也在展示产品，也优先标为“优惠活动”或“价格促销”，不要标为“产品信息”。
 - 如果画面或字幕出现“X vs Y”、“Which is better?”、“哪个更好”、竞品并列、两个产品同框比较、胜负结果、winner、价格/成分/功能对照，这类段落优先标为“产品差异”或“卖点对比”，不要标为“产品信息”或“产品亮相”。
 - 对比类视频的开头即使只是展示两个产品，只要同时出现 vs/which is better/对比问题，也应视为“产品差异”，因为它承担的是建立对比对象和选择悬念。
@@ -792,6 +1013,255 @@ def normalize_content_tag(item):
             item["conversion_point"] = "通过并列比较建立产品选择理由"
 
     return item
+
+
+def _keyword_hits(text, keywords):
+    return [keyword for keyword in keywords if keyword in text]
+
+
+def infer_selling_point_taxonomy(text):
+    text = (text or "").lower()
+    rules = [
+        (
+            "专家背书",
+            [
+                ("从业者内幕", ["as a doctor", "as a trainer", "industry", "insider", "从业", "业内", "行业", "私下用"]),
+                ("专业背书", ["doctor", "dermatologist", "expert", "trainer", "nutritionist", "医生", "专家", "营养师", "教练", "技师"]),
+                ("机构认证", ["certified", "lab", "clinical", "patent", "tested", "approved", "认证", "实验室", "临床", "专利", "检测报告", "批准"]),
+                ("反向信任", ["overhyped", "don't trust", "not worth", "别信", "吐槽", "热门产品", "智商税", "夸大"]),
+            ],
+            "通过背书信息降低信任门槛。",
+        ),
+        (
+            "展示效果",
+            [
+                ("实时演示", ["capture", "remove", "clean", "works", "watch", "demo", "演示", "实时", "吸附", "清洁", "去除", "立刻", "马上", "现场"]),
+                ("对照测试", ["vs", "compare", "comparison", "test against", "对照", "竞品", "对比测试", "同时测试"]),
+                ("前后时间线", ["before and after", "before/after", "使用前后", "前后对比", "day 1", "7 days", "时间线"]),
+                ("个人蜕变故事", ["changed my life", "transformation", "my journey", "改变了我", "蜕变", "变化过程"]),
+                ("用户证言集", ["review", "reviews", "comment", "comments", "rating", "testimonial", "评价", "评论区", "评分", "证言"]),
+                ("数据证明", ["data", "clinical", "lab", "%", "hours", "数据", "实验", "续航", "提升", "降低"]),
+            ],
+            "核心说服力来自画面或口播对效果的直接证明。",
+        ),
+        (
+            "轻松便捷",
+            [
+                ("免决策", ["only one", "best choice", "no brainer", "不用纠结", "闭眼入", "唯一选择", "免决策"]),
+                ("随时随地", ["portable", "travel", "pocket", "bag", "carry", "on the go", "便携", "旅行", "通勤", "随身", "车载"]),
+                ("零门槛", ["beginner", "simple", "install", "anyone", "新手", "简单", "好上手", "安装", "零门槛"]),
+                ("省时间", ["quick", "fast", "seconds", "minutes", "省时", "快速", "几秒", "几分钟"]),
+                ("省步骤", ["one step", "lazy", "without", "no need", "一键", "一步", "懒人", "不用", "无需", "省步骤"]),
+            ],
+            "购买理由集中在降低使用成本和操作门槛。",
+        ),
+        (
+            "制造紧迫感",
+            [
+                ("库存警告", ["sold out", "stock", "restock", "库存", "补货", "抢", "快没了", "售罄"]),
+                ("限时折扣", ["limited-time", "limited time", "today only", "right now", "coupon", "deal", "限时", "现在", "今天", "优惠券", "折扣"]),
+                ("渠道独占", ["only on", "exclusive", "tiktok shop only", "独家", "渠道", "直播间", "当前链接"]),
+                ("社证加速", ["viral", "everyone is buying", "bestseller", "爆单", "都在买", "榜单", "跟风"]),
+            ],
+            "通过时间、库存或节点压力推动立即行动。",
+        ),
+        (
+            "天然安全",
+            [
+                ("成分透明", ["natural", "organic", "plant", "clean ingredients", "天然", "有机", "植物", "无添加", "成分", "不含"]),
+                ("敏感群体安全", ["kids", "baby", "pet safe", "family", "pregnant", "儿童", "宝宝", "宠物", "全家", "孕妇", "敏感肌"]),
+                ("安全恐吓", ["toxic", "harmful", "hidden danger", "有毒", "危险", "隐藏风险", "伤害"]),
+                ("低负担安心", ["non-toxic", "nontoxic", "sensitive", "no alcohol", "低卡", "低糖", "无毒", "低刺激", "食品级", "环保"]),
+            ],
+            "主卖点在于降低安全风险和使用顾虑。",
+        ),
+        (
+            "价格优势",
+            [
+                ("隐性成本曝光", ["waste money", "wasted", "hidden cost", "浪费钱", "隐性成本", "无效替代", "花冤枉钱"]),
+                ("替代价值", ["replace", "instead of", "all in one", "替代多个", "一支搞定", "省下", "总节省"]),
+                ("日均成本拆解", ["per serving", "per use", "per day", "cost breakdown", "每份", "每次", "每天", "单价", "成本"]),
+                ("平替发现", ["dupe", "alternative", "same look", "same quality", "平替", "替代", "同款", "贵价", "发现"]),
+                ("直接比价", ["cheap", "cheaper", "sale", "price", "under $", "便宜", "低价", "比价", "价格标签"]),
+            ],
+            "通过价格、成本或折扣降低购买阻力。",
+        ),
+        (
+            "贩卖生活方式",
+            [
+                ("圈层标识", ["for moms", "pet owners", "gym girls", "clean girl", "圈层", "人群", "妈妈", "宠物家庭", "健身人群"]),
+                ("理想自我投射", ["confidence", "become", "dream", "自信", "理想", "想成为", "更好的自己"]),
+                ("送礼叙事", ["gift", "present", "holiday gift", "礼物", "送礼", "节日", "伴侣"]),
+                ("场景代入", ["summer vibes", "vacation", "patio", "party", "bedroom", "庭院", "派对", "卧室", "通勤", "度假"]),
+                ("文化认同", ["aesthetic", "trend", "viral", "tiktok made me buy", "亚文化", "流行", "趋势", "同款"]),
+                ("审美升级", ["outfit", "style", "fashion", "cozy", "comfy", "审美", "穿搭", "风格", "精致", "质感", "舒服"]),
+            ],
+            "视频把商品包装成一种可向往、可代入的生活状态。",
+        ),
+    ]
+
+    for angle, subrules, reason in rules:
+        for subtype, keywords in subrules:
+            if _keyword_hits(text, keywords):
+                return {
+                    "selling_point_angle": angle,
+                    "selling_point_subtype": subtype,
+                    "selling_point_reason": reason,
+                }
+
+    return {
+        "selling_point_angle": "展示效果",
+        "selling_point_subtype": "结果场景呈现",
+        "selling_point_reason": "默认按画面呈现的产品结果和使用收益归类。",
+    }
+
+
+def _opening_story_text(items):
+    candidates = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start_time", 0)
+        try:
+            start = float(start)
+        except (TypeError, ValueError):
+            start = 0
+        candidates.append((start, item))
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda pair: pair[0])
+    opening_items = [item for start, item in candidates if start <= 3]
+    if not opening_items:
+        opening_items = [candidates[0][1]]
+
+    parts = []
+    for item in opening_items:
+        parts.extend([
+            str(item.get("title", "")),
+            str(item.get("scene_description", "")),
+            str(item.get("script", "")),
+            str(item.get("content_tag", "")),
+            str(item.get("visual_tactic", "")),
+            str(item.get("conversion_point", "")),
+        ])
+    return " ".join(parts).lower()
+
+
+def infer_golden_3s_taxonomy(text):
+    text = (text or "").lower()
+    question_keywords = [
+        "?", "？", "got ", "do you", "are you", "which is better", "listen if",
+        "why is everyone", "how much", "你", "吗", "为什么", "有没有", "哪个", "多少钱",
+    ]
+    pain_keywords = ["pain", "problem", "dirty", "dust", "hair", "毛", "脏", "痛点", "困扰", "麻烦", "失败", "焦虑"]
+    if _keyword_hits(text, question_keywords):
+        if _keyword_hits(text, ["which is better", " vs ", "vs.", "versus", "哪个", "哪一个"]):
+            subtype = "比价追问"
+        elif _keyword_hits(text, ["how much", "cost", "price", "spend", "多少钱", "花费", "成本"]):
+            subtype = "成本提问"
+        elif _keyword_hits(text, pain_keywords):
+            subtype = "痛点提问"
+        elif _keyword_hits(text, ["why is everyone", "everyone", "all over", "所有人", "都在", "为什么大家"]):
+            subtype = "从众提问"
+        elif _keyword_hits(text, ["listen if", "for ", "if your", "如果你", "适合", "人群", "pet", "summer", "bathroom", "kitchen", "通勤", "健身", "浴室", "厨房"]):
+            subtype = "场景驱动型"
+        else:
+            subtype = "好奇提问"
+        return {
+            "golden_3s_hook": "提问式",
+            "golden_3s_subtype": subtype,
+            "golden_3s_reason": "开头通过提问制造参与感或信息缺口，促使目标观众继续看。",
+        }
+
+    if _keyword_hits(text, ["mistake", "mistakes", "hack", "tip", "trick", "secret", "how to", "learn from", "nobody tells", "insider", "早知道", "技巧", "秘诀", "避坑", "踩坑", "没人告诉"]):
+        subtype = "避坑技巧" if _keyword_hits(text, ["mistake", "mistakes", "learn from", "避坑", "踩坑", "早知道"]) else "使用技巧"
+        if _keyword_hits(text, ["cheap", "cheaper", "save", "sale", "discount", "省钱", "便宜", "折扣"]):
+            subtype = "省钱秘笈"
+        elif _keyword_hits(text, ["insider", "industry", "圈内", "业内"]):
+            subtype = "圈内信息"
+        elif _keyword_hits(text, ["nobody tells", "secret", "few people", "没人告诉", "少数人", "别让太多人"]):
+            subtype = "稀缺框架"
+        elif _keyword_hits(text, ["shortcut", "faster", "hack", "捷径", "更快", "省步骤"]):
+            subtype = "捷径承诺"
+        return {
+            "golden_3s_hook": "秘诀/技巧",
+            "golden_3s_subtype": subtype,
+            "golden_3s_reason": "开头承诺提供技巧、经验或避坑信息，制造实用价值期待。",
+        }
+
+    if _keyword_hits(text, ["does it work", "challenge", "test", "try this", "guess", "watch me", "story time", "别", "挑战", "测试", "猜", "看看", "故事"]):
+        if _keyword_hits(text, ["does it work", "really work", "真的有用", "试试看"]):
+            subtype = "悬念验证"
+        elif _keyword_hits(text, ["extreme", "stress test", "耐久", "极限", "荒谬"]):
+            subtype = "极限测试"
+        elif _keyword_hits(text, ["guess", "comment", "猜", "评论"]):
+            subtype = "参与邀请"
+        elif _keyword_hits(text, ["story", "crisis", "故事", "危机", "转折"]):
+            subtype = "故事悬念"
+        else:
+            subtype = "场景还原"
+        return {
+            "golden_3s_hook": "挑战式",
+            "golden_3s_subtype": subtype,
+            "golden_3s_reason": "开头用挑战、警示或反常识表达拉高观看张力。",
+        }
+
+    if re.search(r"(\d+%|\$\s?\d+|\d+\s?(秒|分钟|天|倍|k|m))", text):
+        subtype = "大数锚定" if _keyword_hits(text, ["k", "m", "sold", "views", "comments", "销量", "播放", "评论"]) else "结果前置"
+        if "$" in text or _keyword_hits(text, ["省", "钱", "cost", "price"]):
+            subtype = "对比冲击"
+        if "%" in text or _keyword_hits(text, ["percent", "百分比"]):
+            subtype = "百分比冲击"
+        if _keyword_hits(text, ["秒", "分钟", "天", "second", "minute", "day"]):
+            subtype = "时间线震撼"
+        return {
+            "golden_3s_hook": "震撼数据",
+            "golden_3s_subtype": subtype,
+            "golden_3s_reason": "开头用数字降低理解成本，并制造结果或差异冲击。",
+        }
+
+    if _keyword_hits(text, ["unpopular opinion", "i said what i said", "dupe", "alternative", "vs", "don't buy", "stop buying", "wrong", "别买", "真香", "争议", "平替", "槽点", "颠覆"]):
+        if _keyword_hits(text, ["dupe", "alternative", "vs", "平替"]):
+            subtype = "价格挑衅"
+        elif _keyword_hits(text, ["angry", "annoyed", "mad", "沮丧", "愤怒", "恼火", "吐槽"]):
+            subtype = "情绪挑衅"
+        elif _keyword_hits(text, ["wrong", "myth", "颠覆", "误区", "用错"]):
+            subtype = "颠覆认知"
+        elif _keyword_hits(text, ["don't buy", "stop buying", "别买", "缺陷", "槽点"]):
+            subtype = "槽点揭露"
+        else:
+            subtype = "立场对抗"
+        return {
+            "golden_3s_hook": "争议式",
+            "golden_3s_subtype": subtype,
+            "golden_3s_reason": "开头通过强观点、对立选择或争议表达激发讨论。",
+        }
+
+    return {
+        "golden_3s_hook": "",
+        "golden_3s_subtype": "",
+        "golden_3s_reason": "",
+    }
+
+
+def normalize_marketing_taxonomies(items):
+    combined_text = _combined_story_text(items)
+    opening_text = _opening_story_text(items)
+    selling = infer_selling_point_taxonomy(combined_text)
+    golden_3s = infer_golden_3s_taxonomy(opening_text)
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key, value in selling.items():
+            if not item.get(key):
+                item[key] = value
+        for key, value in golden_3s.items():
+            if not item.get(key):
+                item[key] = value
+    return items
 
 
 def _combined_story_text(items):
@@ -927,12 +1397,19 @@ def enrich_storyboard_result(result_text, video_path):
         item.setdefault("visual_tactic", "按画面与口播综合判断")
         item.setdefault("conversion_point", "")
         item.setdefault("category_reason", "")
+        item.setdefault("selling_point_angle", "")
+        item.setdefault("selling_point_subtype", "")
+        item.setdefault("selling_point_reason", "")
+        item.setdefault("golden_3s_hook", "")
+        item.setdefault("golden_3s_subtype", "")
+        item.setdefault("golden_3s_reason", "")
         item.setdefault("product_category", "")
         item.setdefault("evidence_frame", "")
         item.setdefault("evidence_timestamp", item.get("start_time", 0))
         normalize_content_tag(item)
 
     normalize_formula_classification(parsed)
+    normalize_marketing_taxonomies(parsed)
 
     return json.dumps(extract_storyboard_images(video_path, parsed), ensure_ascii=False)
 
