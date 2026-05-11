@@ -386,7 +386,48 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["formula_subtype"] == "开箱评测型" for item in enriched))
         self.assertIn("开箱", enriched[0]["category_reason"])
 
-    def test_analysis_prompt_requires_fine_grained_storyboard_detail(self):
+    def test_enrich_keeps_single_brand_size_and_sale_haul_as_unboxing_review(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 13,
+                "title": "故事开场",
+                "scene_description": "创作者展示巨大包裹并提到 ComfortBitch，随后先喝饮料制造生活化开场。",
+                "script": "Holy shit, this is huge. It's from ComfortBitch.",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "category_reason": "模型误把尺码讨论当作对比。",
+            },
+            {
+                "start_time": 13,
+                "end_time": 38,
+                "title": "优惠活动",
+                "scene_description": "创作者说明这次购买同一品牌的童码、成人码和扎染款，因为打折且童码更便宜。",
+                "script": "They were on sale and I got the kid sizes. You get the kid sizes if you can fit in it. And it's way cheaper. I've been wanting the tie-dye.",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "category_reason": "模型误把尺码讨论当作对比。",
+            },
+            {
+                "start_time": 38,
+                "end_time": 99,
+                "title": "真实体验",
+                "scene_description": "创作者连续展示同一品牌的紫色和粉色运动裤、连帽衫，并试穿评价尺码和柔软度。",
+                "script": "I got the hoodie too. I got the pink too. Let me try them on. I don't like the kid sizes. It is so freaking soft.",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "category_reason": "模型误把尺码讨论当作对比。",
+            },
+        ], ensure_ascii=False)
+
+        with patch("main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/not-a-real-video.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "开箱 / ASMR" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "开箱评测型" for item in enriched))
+        self.assertIn("开箱", enriched[0]["category_reason"])
+
+    def test_analysis_prompt_requires_stage_based_storyboard_detail(self):
         prompt = main.build_analysis_prompt(
             transcript="00:00 --> 00:06 Which is better, the expensive one or this cheaper dupe?",
             visual_frames=[{"id": "F01", "timestamp": 1.2, "data_url": "data:image/jpeg;base64,abc"}],
@@ -394,6 +435,9 @@ class AnalysisStorageTest(unittest.TestCase):
 
         self.assertIn("明确双对象/双方案对比", prompt)
         self.assertIn("开箱主导结构优先归为开箱 / ASMR", prompt)
+        self.assertIn("阶段化分镜拆解", prompt)
+        self.assertIn("5-8 个分镜", prompt)
+        self.assertIn("不要逐句切分", prompt)
         self.assertIn("scene_description 至少 30 个中文字符", prompt)
         self.assertIn("script 需要覆盖该段完整语义", prompt)
 

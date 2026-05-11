@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -691,7 +692,7 @@ def build_analysis_prompt(transcript, visual_frames=None):
 如果画面显示服装试穿、穿搭展示、换装、转身展示版型，请识别为服饰/穿搭相关内容，不要写成护肤品、清洁用品或其他画面中不存在的品类。
 每个分镜必须绑定一个 evidence_frame 和 evidence_timestamp，描述只能来自该分镜证据帧附近的画面，不要把其他关键帧里的颜色、款式、商品串到当前分镜。
 如果关键帧中只有画面展示、没有真实口播销售词，script 字段写“画面/字幕摘要”，不要编造创作者说过的推销话术。
-服装试穿类视频请优先按“每套穿搭/每次换装”拆分；如果同一套服装连续展示多个角度，可以合并为一个分镜。
+服装试穿、开箱 haul 类视频请优先按“叙事阶段/核心转化目的”拆分，而不是按每一句口播或每个小动作拆分。同一商品的不同尺码讨论、颜色展示、多个角度展示、连续试穿反馈，除非转化目的明显变化，否则应合并为一个分镜。
 """ if visual_frames else """
 你只会收到音频转写，因此如果字幕内容像背景音乐歌词、缺少商品信息，请在分类和分镜中保持保守，不要编造画面里不存在的产品。
 """
@@ -711,10 +712,12 @@ def build_analysis_prompt(transcript, visual_frames=None):
 3. formula_subtype 必须从该大类的小类中选择，不要创造新小类。
 4. 小类只用于判断视频形态，不代表固定步骤顺序；不要为了套小类而强行补不存在的段落。
 5. 分镜步骤从“全局叙事步骤词库”里选择，按视频真实出现顺序标注；一个视频可以只出现其中一部分步骤，也可以重复出现某类步骤。
-6. 请进行细颗粒度分镜拆解。每当画面动作、商品状态、人物站位、试穿状态、展示角度、口播主题或转化目的发生变化，都应拆成新的分镜。一个 2 分钟视频通常应拆成 8-15 个分镜；如果口播信息密集，宁可拆得更细，不要把 20 秒以上的多主题内容塞进一个分镜。
-7. 如果字幕里有西语、英语或其他语言，script 保留原语言；中文只写在分析字段里。
-8. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
-9. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
+6. 请进行阶段化分镜拆解，不要逐句切分，也不要因为轻微动作、站位、镜头角度或同一商品的重复展示变化就拆成新分镜。只有当核心转化目的发生变化时才拆分，例如从开场悬念转到优惠机制、从优惠机制转到产品展示、从产品展示转到试穿反馈、从试穿反馈转到行动号召。一个 2 分钟左右的视频通常拆成 5-8 个分镜，最多不超过 9 个；宁可把同一目的下的连续口播合并成 15-35 秒的完整段落，也不要拆成多个 5-8 秒的小段。
+7. 对开箱 haul / 服装试穿类视频，优先参考这种阶段链路：故事开场/情绪营销 → 优惠活动或购买动机 → 产品卖点/产品信息 → 试穿或真实体验 → 行动号召。同一阶段里出现多个相近款式、颜色、尺码或重复评价时，应合并概括。
+8. 如果字幕里有西语、英语或其他语言，script 保留原语言；中文只写在分析字段里。
+9. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
+10. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
+11. 同一品牌内的童码/成人码、不同尺码、不同颜色、sale 折扣、cheaper 购买技巧属于开箱 haul 或产品测评中的购买信息，不是“平替对决型”。只有出现两个品牌、两个产品、贵价 vs 平替、dupe/alternative 或明确竞品对照时，才允许判为平替对决型。
 
 输出格式：
 [
@@ -752,6 +755,7 @@ def build_analysis_prompt(transcript, visual_frames=None):
 - 只有出现明确双对象/双方案对比，且包含 cheaper、cheap、dupe、alternative、save money、price、per serving、cost、same look、same quality、平替/贵价/大牌/竞品等替代价值表达时，formula_subtype 才优先选择“平替对决型”。单一品牌开箱中提到 sale、kids size、cheaper 只能作为“优惠活动/价格促销”分镜，不得覆盖“开箱 / ASMR”的主类判断。
 - scene_description用中文写，结合画面动作和对应类型套路解释。
 - 时间必须覆盖字幕中的关键内容，尽量与语义段落对齐。
+- 分镜数量要克制：如果多个连续片段都在围绕同一产品、同一优惠机制、同一试穿反馈或同一行动号召展开，请合并为一个分镜，在 script 字段中保留该阶段的关键原文。
 - 所有分镜的 viral_formula 和 formula_subtype 应保持一致，除非视频明显是混合结构；混合时也要以主类型为准。
 - 不要把某个小类的示例流程当作硬性模板；title/content_tag 必须来自视频真实内容。
 
@@ -835,14 +839,6 @@ def should_reclassify_as_alternative_showdown(items):
     if alternative_hits >= 1 and comparison_hits >= 1:
         return True
 
-    current_subtypes = {
-        str(item.get("formula_subtype", ""))
-        for item in items
-        if isinstance(item, dict)
-    }
-    if "前后分屏型" in current_subtypes and alternative_hits >= 2 and before_after_hits == 0:
-        return True
-
     return False
 
 
@@ -865,12 +861,21 @@ def should_classify_as_unboxing_review(items):
         " vs ", "vs.", "versus", "which is better", "winner", "compare", "comparison",
         "dupe", "alternative", "竞品", "贵价", "大牌", "常规方案", "替代品",
     ]
+    single_brand_haul_keywords = [
+        "comfortbitch", "comfort", "hoodie", "pants", "tie-dye", "pink", "purple",
+        "kid size", "kid sizes", "adult size", "adult sizes", "童码", "成人码",
+        "扎染", "连帽衫", "运动裤", "试穿", "try them on", "soft", "sale",
+    ]
 
     unboxing_hits = sum(1 for keyword in unboxing_keywords if keyword in text)
     review_hits = sum(1 for keyword in review_keywords if keyword in text)
     direct_showdown_hits = sum(1 for keyword in direct_showdown_keywords if keyword in text)
+    haul_hits = sum(1 for keyword in single_brand_haul_keywords if keyword in text)
 
-    return unboxing_hits >= 2 and review_hits >= 1 and direct_showdown_hits == 0
+    if direct_showdown_hits > 0:
+        return False
+
+    return (unboxing_hits >= 2 and review_hits >= 1) or (unboxing_hits >= 1 and haul_hits >= 3)
 
 
 def normalize_as_unboxing_review(items):
@@ -1165,6 +1170,16 @@ def analyze_video(transcript, model_type, video_path=None, visual_frames=None, p
     return "[]"
 
 
+def format_duration(seconds):
+    return f"{seconds:.2f}s"
+
+
+def log_analysis_job(job_id, message, **fields):
+    detail = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+    suffix = f" {detail}" if detail else ""
+    print(f"[分析任务 {job_id}] {message}{suffix}", flush=True)
+
+
 def print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames):
     print("\n" + "=" * 88)
     print("视频拆解最终 Prompt")
@@ -1178,28 +1193,80 @@ def print_final_prompt_for_debug(filename, model, prompt, transcript, visual_fra
     print("=" * 88 + "\n")
 
 
-def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None):
+def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None, job_id=None):
+    total_start = time.perf_counter()
     video_path = str(video_path)
+    preprocess_start = time.perf_counter()
+    log_analysis_job(job_id, "开始抽取临时帧", filename=filename, model=model)
     extract_frames(video_path)
+    log_analysis_job(job_id, "开始提取音频", filename=filename)
     has_audio = extract_audio(video_path)
+    log_analysis_job(job_id, "音频提取完成", has_audio=has_audio)
+    log_analysis_job(job_id, "开始 ASR 转写" if has_audio else "视频无音频，跳过 ASR")
     transcript = audio_to_text() if has_audio else "未识别到音频"
+    log_analysis_job(job_id, "ASR 转写完成", transcript_chars=len(transcript or ""))
+    log_analysis_job(job_id, "开始采样视觉关键帧")
     visual_frames = sample_visual_frames(video_path) if video_path else []
+    log_analysis_job(job_id, "视觉关键帧采样完成", frame_count=len(visual_frames))
     prompt = build_analysis_prompt(transcript, visual_frames)
+    log_analysis_job(job_id, "最终 Prompt 构建完成", prompt_chars=len(prompt or ""))
+    preprocess_seconds = time.perf_counter() - preprocess_start
     print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames)
+
+    ai_start = time.perf_counter()
+    log_analysis_job(job_id, "开始调用 AI 分析", model=model)
     result = analyze_video(transcript, model, video_path, visual_frames=visual_frames, prompt=prompt)
+    ai_seconds = time.perf_counter() - ai_start
+    log_analysis_job(job_id, "AI 分析返回", elapsed=format_duration(ai_seconds))
+
+    postprocess_start = time.perf_counter()
+    log_analysis_job(job_id, "开始后处理结果")
     result = enrich_storyboard_result(result, video_path)
     if replace_analysis_id:
-        return update_analysis_record_result(replace_analysis_id, model, result)
-    return persist_analysis(video_path, filename, model, result)
+        stored = update_analysis_record_result(replace_analysis_id, model, result)
+    else:
+        stored = persist_analysis(video_path, filename, model, result)
+    postprocess_seconds = time.perf_counter() - postprocess_start
+    total_seconds = time.perf_counter() - total_start
+    log_analysis_job(job_id, "后处理和保存完成", elapsed=format_duration(postprocess_seconds))
+
+    timing = {
+        "preprocess_seconds": preprocess_seconds,
+        "ai_seconds": ai_seconds,
+        "postprocess_seconds": postprocess_seconds,
+        "total_seconds": total_seconds,
+    }
+    stored["timing"] = timing
+
+    print("\n" + "=" * 88)
+    print("视频拆解耗时统计")
+    print(f"文件名: {filename}")
+    print(f"模型: {model}")
+    print(f"预处理/ASR/关键帧耗时: {format_duration(preprocess_seconds)}")
+    print(f"AI 分析耗时: {format_duration(ai_seconds)}")
+    print(f"后处理/抽分镜图/入库耗时: {format_duration(postprocess_seconds)}")
+    print(f"上传后拆解完成总耗时: {format_duration(total_seconds)}")
+    print("=" * 88 + "\n")
+
+    return stored
 
 
 def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=None):
+    log_analysis_job(
+        job_id,
+        "开始后台分析",
+        filename=filename,
+        model=model,
+        replace_analysis_id=replace_analysis_id,
+    )
     update_analysis_job(job_id, status="processing", message="正在抽帧、转写和分析视频")
     try:
         # The frame/audio helpers use shared temp folders, so serialize pipelines for safety.
+        log_analysis_job(job_id, "等待分析流水线锁")
         with analysis_pipeline_lock:
+            log_analysis_job(job_id, "获得分析流水线锁")
             clean_temp()
-            stored = run_analysis_pipeline(video_path, filename, model, replace_analysis_id)
+            stored = run_analysis_pipeline(video_path, filename, model, replace_analysis_id, job_id=job_id)
             clean_temp()
 
         update_analysis_job(
@@ -1208,16 +1275,26 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
             message="分析完成",
             analysis_id=stored["analysis_id"],
             video_url=stored["video_url"],
+            model=model,
+            timing=stored.get("timing", {}),
             data=stored["data"],
+        )
+        log_analysis_job(
+            job_id,
+            "后台分析完成",
+            analysis_id=stored["analysis_id"],
+            total=format_duration(stored.get("timing", {}).get("total_seconds", 0)),
         )
     except Exception as e:
         print("后台分析任务异常:", e)
+        log_analysis_job(job_id, "后台分析失败", error=str(e))
         update_analysis_job(job_id, status="failed", message=str(e))
     finally:
         try:
             shutil.rmtree(Path(video_path).parent, ignore_errors=True)
         except Exception:
             pass
+        log_analysis_job(job_id, "后台任务清理完成")
 
 
 async def _analyze_impl(

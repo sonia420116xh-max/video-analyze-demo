@@ -43,7 +43,7 @@
         <strong>{{ currentFileName }}</strong>
       </div>
 
-      <section class="job-panel" v-if="currentJobId">
+      <!-- <section class="job-panel" v-if="currentJobId">
         <div>
           <p class="eyebrow">分析任务</p>
           <strong>{{ jobStatusText }}</strong>
@@ -52,7 +52,7 @@
         <el-button size="small" @click="pollJobStatus(currentJobId, true)" :loading="jobPolling">
           查看进度
         </el-button>
-      </section>
+      </section> -->
 
       <section class="history-panel" v-if="historyLoading || historyList.length > 0 || historyError">
         <div class="history-head">
@@ -127,17 +127,23 @@
         </aside>
 
         <main class="story-panel">
-          <div v-if="isActiveReanalysisRunning" class="regenerating-state" v-loading="true">
-            <h3>正在重新生成中</h3>
+          <div v-if="isActiveReanalysisRunning" class="regenerating-banner">
+            <span class="regenerating-spinner" />
+            <strong>正在重新生成中</strong>
             <p>{{ jobMessage || '正在重新抽帧、转写并调用 AI 生成新的视频拆解结果。' }}</p>
           </div>
 
-          <div v-else-if="resultList.length > 0" class="result-head">
+          <div v-if="resultList.length > 0" class="result-head">
             <div>
               <p class="eyebrow">爆款公式</p>
               <!-- <h3>{{ formulaName }} / {{ formulaSubtype }}</h3> -->
               <h3>{{ formulaName }}</h3>
-              <el-tag size="small" type="success">{{ formulaSubtype}}</el-tag>
+              <div class="result-tags">
+                <el-tag size="small" type="success">{{ formulaSubtype }}</el-tag>
+                <el-tag v-if="currentAnalysisModel" size="small" type="info" effect="plain">
+                  {{ currentAnalysisModel }}
+                </el-tag>
+              </div>
               <p class="category-reason" v-if="categoryReason">{{ categoryReason }}</p>
             </div>
             <div class="result-actions">
@@ -155,7 +161,7 @@
             </div>
           </div>
 
-          <div v-if="!isActiveReanalysisRunning && resultList.length > 0" class="story-list">
+          <div v-if="resultList.length > 0" class="story-list">
             <article
               class="story-item"
               v-for="(item, idx) in resultList"
@@ -193,7 +199,7 @@
             </article>
           </div>
 
-          <div v-else-if="!isActiveReanalysisRunning" class="empty-result">
+          <div v-else class="empty-result">
             <h3>等待拆解结果</h3>
             <p>上传视频后，会先判断属于第一人称视角、开箱 / ASMR、GRWM + 产品、分屏对比或日常 Vlog，再按对应叙事套路生成分镜。</p>
           </div>
@@ -225,6 +231,7 @@ const videoPreviewUrl = ref('')
 const isLocalPreview = ref(false)
 const currentFileName = ref('')
 const activeAnalysisId = ref('')
+const currentAnalysisModel = ref('')
 const reanalyzingAnalysisId = ref('')
 const analysisStatusMap = ref({})
 const analysisVersion = ref(Date.now())
@@ -506,6 +513,7 @@ const pollJobStatus = async (jobId, manual = false) => {
     if (job.status === 'completed') {
       resultList.value = JSON.parse(normalizeJsonText(job.data || '[]'))
       activeAnalysisId.value = job.analysis_id || ''
+      currentAnalysisModel.value = job.model || modelType.value || ''
       setAnalysisStatus(activeAnalysisId.value, 'completed')
       reanalyzingAnalysisId.value = ''
       if (job.video_url) setVideoPreview(job.video_url, false)
@@ -592,6 +600,7 @@ const loadAnalysis = async (id) => {
     resultList.value = detail.data || []
     currentFileName.value = detail.filename || ''
     activeAnalysisId.value = detail.id
+    currentAnalysisModel.value = detail.model || ''
     if (detail.model && isModelAvailable(detail.model)) {
       modelType.value = detail.model
     }
@@ -614,6 +623,7 @@ const handleHistorySelect = (item) => {
 const clearCurrentAnalysis = () => {
   resultList.value = []
   activeAnalysisId.value = ''
+  currentAnalysisModel.value = ''
   currentFileName.value = ''
   currentFile = null
   fileList.value = []
@@ -914,27 +924,45 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(10px);
 }
 
-.regenerating-state {
+.regenerating-banner {
   display: grid;
-  align-content: center;
-  justify-items: center;
-  min-height: 560px;
-  padding: 32px;
-  text-align: center;
-  color: #667085;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  color: #475467;
+  background: #f0f7ff;
+  border: 1px solid #b9d7f8;
+  border-radius: 8px;
 }
 
-.regenerating-state h3 {
+.regenerating-banner strong {
+  color: #174a7c;
+  font-size: 14px;
+}
+
+.regenerating-banner p {
   margin: 0;
-  color: #263245;
-  font-size: 22px;
-  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
 }
 
-.regenerating-state p {
-  max-width: 520px;
-  margin: 12px 0 0;
-  line-height: 1.7;
+.regenerating-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #b9d7f8;
+  border-top-color: #2b7de9;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .result-head {
@@ -951,6 +979,14 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.result-tags {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
 .result-actions {
   display: flex;
   align-items: center;
@@ -963,6 +999,7 @@ onBeforeUnmount(() => {
   margin: 8px 0 0;
   color: #667085;
   line-height: 1.6;
+  font-size: 13px;
 }
 
 .story-list {
@@ -973,9 +1010,9 @@ onBeforeUnmount(() => {
 
 .story-item {
   display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: 16px;
-  padding: 16px 0;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 0;
   border-top: 1px solid #e5ebf3;
   cursor: pointer;
 }
@@ -986,8 +1023,8 @@ onBeforeUnmount(() => {
 }
 
 .shot-thumb {
-  width: 120px;
-  aspect-ratio: 9 / 16;
+  width: 56px;
+  aspect-ratio: 7 / 10;
   object-fit: cover;
   border-radius: 8px;
   background: #edf1f7;
@@ -1026,15 +1063,17 @@ onBeforeUnmount(() => {
   margin: 0 0 10px;
   color: #344054;
   line-height: 1.65;
+  font-size: 12px;
 }
 
 .script-text {
   margin: 0 0 12px;
-  padding: 12px 14px;
+  padding: 8px 12px;
   background: #fffaf0;
   border-left: 3px solid #f2b94b;
   color: #5f5140;
   line-height: 1.65;
+  font-size: 12px;
 }
 
 .tags {
