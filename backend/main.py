@@ -19,6 +19,10 @@ from pathlib import Path
 import openai
 import requests
 try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+try:
     from moviepy.editor import VideoFileClip
 except ModuleNotFoundError:
     from moviepy import VideoFileClip
@@ -57,6 +61,7 @@ BRAIN_MODEL = os.getenv("BRAIN_MODEL", "gemini-2.5-pro")
 GPTPROTO_VISION_MODEL = os.getenv("GPTPROTO_VISION_MODEL", "gpt-4o")
 GPTPROTO_CLAUDE_MODEL = os.getenv("GPTPROTO_CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
+ENABLE_ASR = os.getenv("ENABLE_ASR", "").strip().lower() in {"1", "true", "yes", "on"}
 # ==========================================================
 
 MODEL_OPTIONS = [
@@ -126,6 +131,10 @@ class AnalysisCancelled(RuntimeError):
     pass
 
 
+class VideoDownloadError(RuntimeError):
+    pass
+
+
 PATTERN_TAXONOMY = """
 内部爆款模式分类体系：
 
@@ -159,6 +168,7 @@ PATTERN_TAXONOMY = """
 4. 分屏对比
 适用判断：左右分屏、前后对比、有无产品对比、竞品/平替对比、淘汰赛式测试；核心是直观证明差异。
 小类：
+- 产品对比型：同款或多个产品、款式、颜色、尺码、姿态被同框或分屏展示，重点是让观众直接比较选择。
 - 方法对比型：比较两种做法、两种使用路径或错误/正确方法。
 - 淘汰赛型：多个产品或方案被逐个测试、筛选、淘汰，最后突出胜出者。
 - 平替对决型：把目标产品与贵价、竞品或常规方案对比，强调替代价值。
@@ -183,7 +193,8 @@ PATTERN_TAXONOMY = """
 - 使用说明：怎么打开、怎么涂、怎么装、怎么按、怎么清洁、怎么携带。
 - 功能演示：实际操作产品并展示功能发生过程。
 - 产品卖点：明确讲一个可购买理由，如便携、保湿、省时、防漏、好看、耐用。
-- 产品差异：与旧方法、竞品、普通产品、贵价产品或其他方案的不同。
+- 产品对比：两个或多个产品、品牌、方案被同框、分屏、口播或字幕放在一起比较，建立选择关系。
+- 产品差异：单个产品相对旧方法、普通产品、常规方案或竞品的不同点；如果已经形成明确双对象比较，优先用“产品对比”。
 - 卖点对比：并列比较多个卖点或多个选择的强弱。
 - 痛点解决：说明产品如何解决前面出现的问题。
 - 产品功效：展示或宣称结果、改善、效果、体验收益。
@@ -738,6 +749,81 @@ def safe_storage_key(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "default")).strip("._") or "default"
 
 
+def guess_video_filename_from_url(video_url):
+    try:
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(video_url)
+        filename = Path(unquote(parsed.path or "")).name
+    except Exception:
+        filename = ""
+    return safe_filename(filename or "downloaded-video.mp4")
+
+
+def normalize_download_error(error):
+    message = str(error or "").strip()
+    lowered = message.lower()
+    if "unsupported url" in lowered:
+        reason = "当前链接平台暂不支持自动下载"
+    elif "private" in lowered or "login" in lowered or "sign in" in lowered or "cookies" in lowered:
+        reason = "该视频可能需要登录、Cookie 或权限才能下载"
+    elif "unavailable" in lowered or "removed" in lowered or "not found" in lowered or "404" in lowered:
+        reason = "该视频不可用、已删除或链接无法访问"
+    elif "timeout" in lowered or "timed out" in lowered:
+        reason = "下载超时，可能是网络或平台限制造成"
+    elif "http error 403" in lowered or "forbidden" in lowered:
+        reason = "平台拒绝下载请求，可能需要登录或存在防盗链限制"
+    else:
+        reason = message or "未知下载错误"
+    return f"{reason}。请下载到本地后使用“上传视频”手动上传解析。"
+
+
+def download_video_from_url(video_url, target_dir):
+    url = (video_url or "").strip()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        raise VideoDownloadError("请输入以 http:// 或 https:// 开头的视频链接。请改为手动上传视频文件。")
+    if yt_dlp is None:
+        raise VideoDownloadError("后端未安装 yt-dlp，暂时无法从 TikTok、Instagram 或 YouTube 链接下载。请安装依赖后重试，或手动上传视频文件。")
+
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_template = str(target_dir / "%(title).120B-%(id)s.%(ext)s")
+    options = {
+        "outtmpl": output_template,
+        "format": "bv*+ba/b[ext=mp4]/b",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 1,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info.get("_type") == "playlist":
+                entries = [item for item in info.get("entries") or [] if item]
+                info = entries[0] if entries else info
+            downloaded_path = ydl.prepare_filename(info)
+    except Exception as e:
+        raise VideoDownloadError(normalize_download_error(e)) from e
+
+    candidates = []
+    if downloaded_path:
+        candidates.append(Path(downloaded_path))
+        candidates.append(Path(downloaded_path).with_suffix(".mp4"))
+    candidates.extend(sorted(target_dir.glob("*"), key=lambda path: path.stat().st_mtime, reverse=True))
+    video_path = next((path for path in candidates if path.exists() and path.is_file()), None)
+    if not video_path:
+        raise VideoDownloadError("链接下载完成后没有找到视频文件。请手动上传视频文件。")
+
+    filename = safe_filename(info.get("title") or video_path.name)
+    if not Path(filename).suffix:
+        filename = f"{filename}{video_path.suffix or '.mp4'}"
+    return video_path, filename
+
+
 def get_model_api_key(key_name):
     if key_name == "GPTPROTO_API_KEY":
         return GPTPROTO_API_KEY
@@ -797,6 +883,14 @@ def persist_analysis(video_path, original_filename, model, result_json):
         "video_url": video_url,
         "data": normalized_result_json,
     }
+
+
+def persist_job_preview_video(job_id, video_path, filename):
+    safe_name = safe_filename(filename)
+    stored_video_name = f"job_{safe_storage_key(job_id)}_{safe_name}"
+    stored_video_path = STORED_VIDEO_DIR / stored_video_name
+    shutil.copy2(video_path, stored_video_path)
+    return f"/storage/videos/{stored_video_name}"
 
 
 def update_analysis_job(job_id, db_path=DB_PATH, **updates):
@@ -1170,7 +1264,7 @@ def build_analysis_prompt(transcript, visual_frames=None):
 分类、商品品类、场景和分镜必须优先依据关键帧画面证据；字幕或音频可能只是背景音乐歌词，不能把无关歌词当成商品说明。
 如果画面显示服装试穿、穿搭展示、换装、转身展示版型，请识别为服饰/穿搭相关内容，不要写成护肤品、清洁用品或其他画面中不存在的品类。
 每个分镜必须绑定一个 evidence_frame 和 evidence_timestamp，描述只能来自该分镜证据帧附近的画面，不要把其他关键帧里的颜色、款式、商品串到当前分镜。
-如果关键帧中只有画面展示、没有真实口播销售词，script 字段写“画面/字幕摘要”，不要编造创作者说过的推销话术。
+script 字段只写该时间段真实口播或真实字幕原文；如果只有画面展示、背景音乐歌词或无关音频，script 写“无有效口播/字幕”，不要把画面描述改写成脚本，也不要编造创作者说过的推销话术。
 服装试穿、开箱 haul 类视频请优先按“叙事阶段/核心转化目的”拆分，而不是按每一句口播或每个小动作拆分；同一商品的不同尺码讨论、颜色展示、多个角度展示、连续试穿反馈，除非转化目的明显变化，否则应合并为一个分镜。
 但视觉场景切换（如从单人试穿切换到两个产品同框对比、从清洁特写切换到手持手机展示价格页面、从室内场景切换到室外场景）始终优先于叙事目的合并，必须拆分为独立分镜。
 """ if visual_frames else """
@@ -1211,12 +1305,14 @@ def build_analysis_prompt(transcript, visual_frames=None):
 9. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
 10. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
 11. 同一品牌内的童码/成人码、不同尺码、不同颜色、sale 折扣、cheaper 购买技巧属于开箱 haul 或产品测评中的购买信息，不是“平替对决型”。只有出现两个品牌、两个产品、贵价 vs 平替、dupe/alternative 或明确竞品对照时，才允许判为平替对决型。
-12. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
-13. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
+12. 前后分屏型必须是同一对象、同一身体部位、同一空间或同一产品在“使用前 vs 使用后”“有产品 vs 无产品”“处理前 vs 处理后”的状态对比；同款服装不同颜色、不同尺码、不同姿态的左右分屏不是前后分屏型，应标为分屏对比 / 产品对比型，不能写成“使用前后”。
+13. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
+14. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
 
 短视频分镜补充规则：对 12-30 秒的镜前 GRWM POV / 服装试穿短视频，不要因为全片都在展示同一件衣服就合并成 1 个分镜；如果画面或字幕依次出现开场情绪/亮相、多角度转身展示、版型/洗水/剪裁/尺码/购买码/链接等不同转化目的，通常拆成 3-4 个分镜。典型结构是：0-3 秒情绪营销或故事开场 → 中段优惠活动/购买动机或多角度展示 → 后段产品卖点/真实体验/行动号召。镜前 GRWM POV 单品试穿优先判为“GRWM + 产品 / 仪式步骤型”，不要创造“穿搭展示型”等体系外小类。注意：30-60 秒视频按视觉切换通常拆成 4-6 个分镜；60-120 秒拆成 6-10 个。禁止为了凑数量而合并视觉切换。
 
 护肤/护发/美妆/洗护 GRWM 补充规则：如果主体内容是“使用频率/适用状态 → 操作步骤（按摩、涂抹、清洗、梳理等）→ 成分或功效 → 使用后体验/促销”，优先判为“GRWM + 产品 / 仪式步骤型”。开头的夸张情绪宣言、痛点表达或个人偏好只算情绪营销/黄金3秒钩子，不能覆盖全片小类。
+护发/防脱/洗护产品优先级规则：只要创作者在浴室、镜前或个人护理场景中亲自展示护发、洗护、美妆、护肤产品包装，并完成涂抹、清洗、起泡、梳理、按摩、使用后效果展示等流程，即使字幕写了 POV，也优先判为“GRWM + 产品 / 仪式步骤型”；不要因为 POV 文案判为“第一人称视角”，也不要因为有使用前后效果判为“分屏对比”。
 
 输出格式：
 [
@@ -1247,19 +1343,19 @@ def build_analysis_prompt(transcript, visual_frames=None):
 
 要求：
 - 只输出JSON数组，严禁markdown代码块。
-- 如果存在真实口播，script 保留原语言，不要编造原文没有的句子；如果只有背景音乐歌词或无关音频，script 写画面/字幕摘要。
+- 如果存在真实口播或真实销售字幕，script 保留原语言原文，不要编造原文没有的句子；如果只有背景音乐歌词、无关音频或纯画面展示，script 写“无有效口播/字幕”，不要在 script 中复述画面描述。
 - product_category 必须依据关键帧画面判断，不能依据无关音频歌词猜测。
 - evidence_frame/evidence_timestamp 必须对应你用于描述该分镜的关键帧；颜色、款式、商品只允许来自这个证据帧附近。
 - 对服饰视频，不要在没有证据时写具体颜色；如果写颜色，必须是 evidence_frame 中清楚可见的颜色。
 - scene_description 至少 30 个中文字符，要同时写清楚人物动作、商品状态/款式、镜头关系，以及这一段在爆款叙事中的作用；不要只写“展示产品”“创作者介绍商品”这种泛描述。
-- script 需要覆盖该段完整语义。若同一时间段有多句口播，请合并保留关键原文；如果是画面摘要，也要写清楚画面里发生的具体动作。
+- script 需要覆盖该段完整口播/字幕语义。若同一时间段有多句口播，请合并保留关键原文；如果该段没有有效口播或字幕，固定写“无有效口播/字幕”，画面动作只写在 scene_description。
 - 分镜边界不得机械按字幕时间戳切断台词：不要把一句完整台词、因果句、转折句或从句拆到两个分镜里，也不要让上一分镜 script 以未完成的连接语、铺垫语或半句话收尾。分镜时间边界可以围绕视觉切点前后微调，优先让每个 script 都是可独立理解的完整语义单元；如果视觉已经明显切换，则新分镜的 script 从下一句完整语义开始。
 - 每个分镜的 conversion_point 必须具体到“为什么让用户更想买/更信任/更省钱/更理解差异”，不要写空泛的“促进转化”。
 - selling_point_angle 和 selling_point_subtype 必须严格从“卖点角度分类体系”选择；selling_point_reason 要说明它解决的是信任、效果、省事、紧迫、安全、省钱还是生活方式想象。
 - golden_3s_hook 和 golden_3s_subtype 只有在开头存在明确钩子时才从“黄金3秒钩子分类体系”选择；如果只是普通场景铺垫、产品自然出现、平铺直叙或无法判断，三个 golden_3s_* 字段都留空。golden_3s_reason 只能依据开头约 0-3 秒或最早分镜，不能引用后半段内容。
 - content_tag 以该段核心转化作用为准。只要该段提到便宜购买方法、优惠、折扣、deal、sale、coupon、price、save、link、shop、cart、购买路径或下单引导，优先标为“优惠活动”或“价格促销”，不要标为“产品信息”。但如果该段同时存在明显视觉切换（如手持手机展示价格页面、商店货架特写），优先按视觉边界拆分为独立分镜，再分别标注 content_tag。
-- 如果画面或字幕出现“X vs Y”、“Which is better?”、“哪个更好”、竞品并列、两个产品同框比较、胜负结果、winner、价格/成分/功能对照，这类段落优先标为“产品差异”或“卖点对比”，不要标为“产品信息”或“产品亮相”。
-- 对比类视频的开头即使只是展示两个产品，只要同时出现 vs/which is better/对比问题，也应视为“产品差异”，因为它承担的是建立对比对象和选择悬念。
+- 如果画面或字幕出现“X vs Y”、“Which is better?”、“哪个更好”、竞品并列、两个产品同框比较、胜负结果、winner、价格/成分/功能对照，这类段落优先标为“产品对比”；如果重点是多个购买理由强弱，再标为“卖点对比”；如果重点是清洁/使用结果差异，再标为“效果对比”。不要标为“产品信息”或“产品亮相”。
+- 对比类视频的开头即使只是展示两个产品，只要同时出现 vs/which is better/对比问题，也应视为“产品对比”，因为它承担的是建立对比对象和选择悬念。
 - 只有出现明确双对象/双方案对比，且包含 cheaper、cheap、dupe、alternative、save money、price、per serving、cost、same look、same quality、平替/贵价/大牌/竞品等替代价值表达时，formula_subtype 才优先选择“平替对决型”。单一品牌开箱中提到 sale、kids size、cheaper 只能作为“优惠活动/价格促销”分镜，不得覆盖“开箱 / ASMR”的主类判断。
 - scene_description用中文写，结合画面动作和对应类型套路解释。
 - 时间必须覆盖字幕中的关键内容，尽量与语义段落对齐。
@@ -1309,7 +1405,7 @@ def normalize_content_tag(item):
         "which is better", "compare", "comparison", "versus", "better than", "difference",
     ]
     if any(keyword in text for keyword in contrast_keywords):
-        item["content_tag"] = "产品差异"
+        item["content_tag"] = "产品对比"
         if not item.get("conversion_point"):
             item["conversion_point"] = "通过并列比较建立产品选择理由"
         return item
@@ -1328,6 +1424,7 @@ ALLOWED_STORY_STEPS = {
     "使用说明",
     "功能演示",
     "产品卖点",
+    "产品对比",
     "产品差异",
     "卖点对比",
     "痛点解决",
@@ -1355,7 +1452,9 @@ def infer_standard_story_step(item):
 
     if _keyword_hits(text, ["coupon", "discount", "deal", "sale", "price", "code", "link", "shop", "cart", "购买", "链接", "优惠", "折扣", "促销", "价格"]):
         return "优惠活动"
-    if _keyword_hits(text, ["vs", "which is better", "compare", "comparison", "winner", "对比", "差异", "哪个更好"]):
+    if _keyword_hits(text, ["vs", "which is better", "compare", "comparison", "winner", "对比", "哪个更好"]):
+        return "产品对比"
+    if _keyword_hits(text, ["差异", "区别", "不同", "旧方法", "普通产品", "常规方案"]):
         return "产品差异"
     if _keyword_hits(text, ["wash", "cut", "fit", "sizing", "size", "denim", "版型", "剪裁", "洗水", "尺码", "腰部", "臀部", "显瘦", "包裹"]):
         return "产品卖点"
@@ -1658,11 +1757,11 @@ def should_reclassify_as_alternative_showdown(items):
         return False
 
     alternative_keywords = [
-        "平替", "替代", "替代品", "同款", "大牌", "贵价", "高价", "竞品", "常规方案",
+        "平替", "替代", "替代品", "大牌", "贵价", "高价", "竞品", "常规方案",
         "价格", "单价", "每份", "成本", "低价", "$", "price", "cost", "per serving",
-        "童码", "儿童码", "成人码", "尺码", "dupe", "alternative", "cheaper", "cheap",
+        "dupe", "alternative", "cheaper", "cheap",
         "affordable", "expensive", "save money", "save", "same look", "same quality",
-        "instead of", "rather than", "kid size", "kid sizes", "kids size", "kids sizes",
+        "instead of", "rather than",
         "bissell", "redhut", "red-hut", "steam shot", "viral",
     ]
     comparison_keywords = [
@@ -1814,9 +1913,89 @@ def normalize_grwm_ritual_care_routine(items):
     return items
 
 
+def should_classify_as_grwm_product_care_demo(items):
+    text = _combined_story_text(items).lower()
+    if not text.strip():
+        return False
+
+    care_hits = _keyword_hits(text, [
+        "hair", "scalp", "shampoo", "anti-dht", "dht", "baldness", "hair loss",
+        "thinning hair", "hairline", "redensify", "densify", "bathroom", "shower",
+        "护发", "头发", "头皮", "洗发", "防脱", "脱发", "发际线", "稀疏", "浴室", "洗护",
+        "护肤", "美妆", "护理",
+    ])
+    product_hits = _keyword_hits(text, [
+        "miraj", "product", "bottle", "tube", "shampoo", "serum", "spray", "cream",
+        "品牌", "产品", "瓶", "管装", "包装", "洗发水", "精华", "喷雾", "膏体",
+    ])
+    usage_hits = _keyword_hits(text, [
+        "apply", "wash", "rinse", "comb", "brush", "lather", "foam", "massage",
+        "涂抹", "清洗", "冲洗", "梳", "刷", "起泡", "泡沫", "按摩", "使用", "步骤",
+    ])
+    result_hits = _keyword_hits(text, [
+        "result", "after", "before", "solution", "cover", "coverage", "效果", "使用后", "前后", "解决方案",
+    ])
+
+    return bool(care_hits and product_hits and usage_hits and result_hits)
+
+
+def normalize_grwm_product_care_demo(items):
+    reason = "视频主体是创作者在浴室或镜前亲自完成护发、洗护、美妆等个人护理流程，并清晰露出产品包装、使用步骤和使用后效果；即使画面出现 POV 文案，也应优先归为 GRWM + 产品 / 仪式步骤型，而不是第一人称视角或分屏对比。"
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item["viral_formula"] = "GRWM + 产品"
+        item["formula_subtype"] = "仪式步骤型"
+        item["category_reason"] = reason
+    return items
+
+
+def should_classify_as_same_item_variant_split(items):
+    text = _combined_story_text(items).lower()
+    if not text.strip():
+        return False
+
+    split_hits = _keyword_hits(text, [
+        "分屏", "左右", "同屏", "同框", "并排", "两侧", "交叉剪辑", "快速剪辑", "快速切换",
+        "two colors", "split screen", "side by side",
+    ])
+    variant_hits = _keyword_hits(text, [
+        "粉色", "灰色", "颜色", "两种颜色", "不同颜色", "同款", "同款式", "同一位", "同一名",
+        "长袍", "连衣裙", "头巾", "abaya", "robe", "hijab", "scarf",
+        "pink", "gray", "grey", "same style", "same item", "different color",
+    ])
+    before_after_hits = _keyword_hits(text, [
+        "使用前", "使用后", "有无产品", "before and after", "before/after", "after use", "before use",
+        "半边脸", "左右半边", "效果变化",
+    ])
+    alternative_hits = _keyword_hits(text, [
+        "平替", "替代", "dupe", "alternative", "cheaper", "cheap", "price", "$", "贵价", "竞品", "大牌",
+        "save money", "instead of", "rather than",
+    ])
+
+    return bool(split_hits and variant_hits and not before_after_hits and not alternative_hits)
+
+
+def normalize_same_item_variant_split(items):
+    reason = "画面是同一服装或同款商品的不同颜色/姿态分屏对照展示，核心是变体差异和上身观感；没有使用前/使用后状态，也没有价格、竞品或替代价值证据，因此属于分屏对比 / 产品对比型，不能判为前后分屏型或平替对决型。"
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item["viral_formula"] = "分屏对比"
+        item["formula_subtype"] = "产品对比型"
+        item["category_reason"] = reason
+    return items
+
+
 def normalize_formula_classification(items):
     if should_classify_as_unboxing_review(items):
         return normalize_as_unboxing_review(items)
+
+    if should_classify_as_same_item_variant_split(items):
+        return normalize_same_item_variant_split(items)
+
+    if should_classify_as_grwm_product_care_demo(items):
+        return normalize_grwm_product_care_demo(items)
 
     if should_reclassify_as_alternative_showdown(items):
         reason = "核心表达是贵价/竞品/常规方案与更便宜或替代方案的对比，强调平替价值，因此判定为平替对决型。"
@@ -1938,6 +2117,10 @@ def get_faster_whisper_model():
 
 
 def audio_to_text():
+    if not ENABLE_ASR:
+        print("自动 ASR 未启用，使用空字幕继续分析")
+        return ""
+
     faster_model = get_faster_whisper_model()
     if faster_model is not None:
         try:
@@ -1975,7 +2158,7 @@ def audio_to_text():
 
     if not OPENAI_API_KEY:
         print("未配置 OPENAI_API_KEY，跳过音频转文字，使用无字幕模式继续分析")
-        return "未识别到音频"
+        return ""
 
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     try:
@@ -1990,7 +2173,15 @@ def audio_to_text():
         raise RuntimeError("OpenAI 额度不足或配额已用尽，请检查 billing/配额")
     except Exception as e:
         print("语音转文字错误:", e)
-        return "未识别到音频"
+        return ""
+
+def safe_audio_to_text():
+    try:
+        return audio_to_text() or ""
+    except Exception as e:
+        print("ASR 转写失败，使用空字幕继续分析:", e)
+        return ""
+
 
 def analyze_video(transcript, model_type, video_path=None, visual_frames=None, prompt=None):
     if visual_frames is None:
@@ -2175,25 +2366,33 @@ def print_final_prompt_for_debug(filename, model, prompt, transcript, visual_fra
     print("=" * 88 + "\n")
 
 
-def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None, job_id=None):
+def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None, job_id=None, transcript_override=None):
     total_start = time.perf_counter()
     video_path = str(video_path)
+    transcript_override = (transcript_override or "").strip()
     preprocess_start = time.perf_counter()
     check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "开始抽取临时帧", filename=filename, model=model)
     extract_frames(video_path)
     check_analysis_cancelled(job_id)
-    log_analysis_job(job_id, "开始提取音频", filename=filename)
-    audio_extract_start = time.perf_counter()
-    has_audio = extract_audio(video_path)
-    audio_extract_seconds = time.perf_counter() - audio_extract_start
-    check_analysis_cancelled(job_id)
-    log_analysis_job(job_id, "音频提取完成", has_audio=has_audio)
-    log_analysis_job(job_id, "开始 ASR 转写" if has_audio else "视频无音频，跳过 ASR")
-    asr_start = time.perf_counter()
-    transcript = audio_to_text() if has_audio else "未识别到音频"
-    asr_seconds = time.perf_counter() - asr_start
-    log_analysis_job(job_id, "ASR 转写完成", transcript_chars=len(transcript or ""))
+    if transcript_override:
+        has_audio = None
+        audio_extract_seconds = 0
+        asr_seconds = 0
+        transcript = transcript_override
+        log_analysis_job(job_id, "使用手动字幕，跳过音频提取和 ASR", transcript_chars=len(transcript))
+    else:
+        log_analysis_job(job_id, "开始提取音频", filename=filename)
+        audio_extract_start = time.perf_counter()
+        has_audio = extract_audio(video_path)
+        audio_extract_seconds = time.perf_counter() - audio_extract_start
+        check_analysis_cancelled(job_id)
+        log_analysis_job(job_id, "音频提取完成", has_audio=has_audio)
+        log_analysis_job(job_id, "开始 ASR 转写" if has_audio else "视频无音频，跳过 ASR")
+        asr_start = time.perf_counter()
+        transcript = safe_audio_to_text() if has_audio else ""
+        asr_seconds = time.perf_counter() - asr_start
+        log_analysis_job(job_id, "ASR 转写完成", transcript_chars=len(transcript or ""))
     log_analysis_job(job_id, "开始采样视觉关键帧")
     visual_frames = sample_visual_frames(video_path) if video_path else []
     check_analysis_cancelled(job_id)
@@ -2255,7 +2454,7 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     return stored
 
 
-def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=None):
+def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=None, transcript_override=None):
     log_analysis_job(
         job_id,
         "开始后台分析",
@@ -2271,7 +2470,14 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
             log_analysis_job(job_id, "获得分析流水线锁")
             check_analysis_cancelled(job_id)
             clean_temp()
-            stored = run_analysis_pipeline(video_path, filename, model, replace_analysis_id, job_id=job_id)
+            stored = run_analysis_pipeline(
+                video_path,
+                filename,
+                model,
+                replace_analysis_id,
+                job_id=job_id,
+                transcript_override=transcript_override,
+            )
             clean_temp()
 
         update_analysis_job(
@@ -2311,9 +2517,11 @@ async def _analyze_impl(
     file: UploadFile = None,
     video_url: str = Form(None),
     model: str = Form("gpt-4o"),
-    async_mode: bool = Form(False)
+    async_mode: bool = Form(False),
+    transcript_override: str = Form(None)
 ):
     try:
+        source_video_url = (video_url or "").strip()
         if file:
             filename = file.filename or "video.mp4"
             if async_mode:
@@ -2326,7 +2534,7 @@ async def _analyze_impl(
 
                 thread = threading.Thread(
                     target=run_analysis_job,
-                    args=(job_id, video_path, filename, model),
+                    args=(job_id, video_path, filename, model, None, transcript_override),
                     daemon=True,
                 )
                 thread.start()
@@ -2347,7 +2555,16 @@ async def _analyze_impl(
                     video_path,
                     filename,
                     model,
+                    transcript_override=transcript_override,
                 )
+        elif source_video_url:
+            job_id = start_url_analysis_job(source_video_url, model, transcript_override)
+            return {
+                "code": 0,
+                "job_id": job_id,
+                "status": "queued",
+                "msg": "视频链接任务已提交，后端将先下载视频再分析",
+            }
         else:
             return JSONResponse(status_code=400, content={"code": 400, "msg": "请上传视频文件"})
 
@@ -2357,6 +2574,8 @@ async def _analyze_impl(
             "analysis_id": stored["analysis_id"],
             "video_url": stored["video_url"],
         }
+    except VideoDownloadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
@@ -2364,14 +2583,65 @@ async def _analyze_impl(
         raise HTTPException(status_code=500, detail="服务内部异常，请查看后端日志")
 
 
+def start_url_analysis_job(source_video_url, model, transcript_override=None):
+    job_id = create_analysis_job(guess_video_filename_from_url(source_video_url), model)
+    job_dir = JOB_UPLOAD_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    def download_and_analyze_url_job():
+        try:
+            log_analysis_job(job_id, "开始下载视频链接", url=source_video_url)
+            update_analysis_job(job_id, status="processing", message="正在下载视频链接")
+            downloaded_path, downloaded_filename = download_video_from_url(source_video_url, job_dir)
+            preview_url = persist_job_preview_video(job_id, downloaded_path, downloaded_filename)
+            size_mb = f"{Path(downloaded_path).stat().st_size / 1024 / 1024:.2f}MB"
+            log_analysis_job(
+                job_id,
+                "视频链接下载完成",
+                filename=downloaded_filename,
+                path=downloaded_path,
+                size=size_mb,
+                preview_url=preview_url,
+            )
+            update_analysis_job(
+                job_id,
+                filename=downloaded_filename,
+                video_url=preview_url,
+                message="视频下载完成，正在抽帧、转写和分析",
+            )
+            run_analysis_job(job_id, downloaded_path, downloaded_filename, model, None, transcript_override)
+        except VideoDownloadError as e:
+            log_analysis_job(job_id, "视频链接下载失败", error=str(e))
+            update_analysis_job(job_id, status="failed", message=str(e))
+            job_cancel_events.pop(job_id, None)
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception as e:
+            print("视频链接下载任务异常:", e)
+            log_analysis_job(job_id, "视频链接下载任务异常", error=str(e))
+            update_analysis_job(job_id, status="failed", message=normalize_download_error(e))
+            job_cancel_events.pop(job_id, None)
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+    thread = threading.Thread(target=download_and_analyze_url_job, daemon=True)
+    thread.start()
+    return job_id
+
+
 @app.post("/analyze")
 async def analyze(
     file: UploadFile = None,
     video_url: str = Form(None),
     model: str = Form("gpt-4o"),
-    async_mode: bool = Form(False)
+    async_mode: bool = Form(False),
+    transcript_override: str = Form(None)
 ):
-    return await _analyze_impl(file=file, video_url=video_url, model=model, async_mode=async_mode)
+    return await _analyze_impl(
+        file=file,
+        video_url=video_url,
+        model=model,
+        async_mode=async_mode,
+        transcript_override=transcript_override,
+    )
 
 
 @app.post("/api/analyze")
@@ -2379,9 +2649,16 @@ async def analyze_with_api_prefix(
     file: UploadFile = None,
     video_url: str = Form(None),
     model: str = Form("gpt-4o"),
-    async_mode: bool = Form(False)
+    async_mode: bool = Form(False),
+    transcript_override: str = Form(None)
 ):
-    return await _analyze_impl(file=file, video_url=video_url, model=model, async_mode=async_mode)
+    return await _analyze_impl(
+        file=file,
+        video_url=video_url,
+        model=model,
+        async_mode=async_mode,
+        transcript_override=transcript_override,
+    )
 
 
 @app.get("/analysis-jobs/{job_id}")
@@ -2456,7 +2733,7 @@ async def analysis_detail_with_api_prefix(analysis_id: str):
     return await analysis_detail(analysis_id)
 
 
-def start_reanalysis_background_job(analysis_id, model=None):
+def start_reanalysis_background_job(analysis_id, model=None, transcript_override=None):
     prepared = prepare_reanalysis_job(analysis_id, model=model)
     thread = threading.Thread(
         target=run_analysis_job,
@@ -2466,6 +2743,7 @@ def start_reanalysis_background_job(analysis_id, model=None):
             prepared["filename"],
             prepared["model"],
             prepared["replace_analysis_id"],
+            transcript_override,
         ),
         daemon=True,
     )
@@ -2474,9 +2752,17 @@ def start_reanalysis_background_job(analysis_id, model=None):
 
 
 @app.post("/analyses/{analysis_id}/reanalyze")
-async def reanalyze(analysis_id: str, model: str = Form(None)):
+async def reanalyze(
+    analysis_id: str,
+    model: str = Form(None),
+    transcript_override: str = Form(None),
+):
     try:
-        prepared = start_reanalysis_background_job(analysis_id, model=model)
+        prepared = start_reanalysis_background_job(
+            analysis_id,
+            model=model,
+            transcript_override=transcript_override,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
@@ -2494,8 +2780,16 @@ async def reanalyze(analysis_id: str, model: str = Form(None)):
 
 
 @app.post("/api/analyses/{analysis_id}/reanalyze")
-async def reanalyze_with_api_prefix(analysis_id: str, model: str = Form(None)):
-    return await reanalyze(analysis_id, model=model)
+async def reanalyze_with_api_prefix(
+    analysis_id: str,
+    model: str = Form(None),
+    transcript_override: str = Form(None),
+):
+    return await reanalyze(
+        analysis_id,
+        model=model,
+        transcript_override=transcript_override,
+    )
 
 
 @app.delete("/analyses/{analysis_id}")
@@ -2513,4 +2807,11 @@ async def delete_analysis_with_api_prefix(analysis_id: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8001"))
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=True)
+    reload_enabled = os.getenv("RELOAD", "").strip().lower() in {"1", "true", "yes", "on"}
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=reload_enabled,
+        reload_dirs=[str(Path(__file__).parent)] if reload_enabled else None,
+    )

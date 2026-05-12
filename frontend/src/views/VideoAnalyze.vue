@@ -8,6 +8,13 @@
         </div>
 
         <div class="tool-bar">
+          <el-input
+            v-model="videoUrlInput"
+            class="video-url-input"
+            clearable
+            placeholder="粘贴 TikTok / Instagram / YouTube 视频链接"
+            @keyup.enter="startAnalyze"
+          />
           <el-upload
             :auto-upload="false"
             :on-change="handleFileChange"
@@ -50,6 +57,25 @@
         <span>当前视频</span>
         <strong>{{ currentFileName }}</strong>
       </div>
+
+      <div class="file-strip" v-else-if="videoUrlInput.trim()">
+        <span>视频链接</span>
+        <strong>{{ videoUrlInput.trim() }}</strong>
+      </div>
+
+      <section class="manual-transcript-panel">
+        <div>
+          <p class="eyebrow">手动字幕</p>
+          <h3>ASR 兜底输入</h3>
+        </div>
+        <el-input
+          v-model="manualTranscript"
+          type="textarea"
+          :rows="4"
+          resize="vertical"
+          placeholder="可选：粘贴 0.00 --> 3.08 ... 格式的口播字幕；填写后本次分析会跳过自动 ASR。"
+        />
+      </section>
 
       <!-- <section class="job-panel" v-if="currentJobId">
         <div>
@@ -261,7 +287,10 @@
                         <strong>{{ item.title || item.narrative_role || `分镜 ${idx + 1}` }}</strong>
                       </div>
                       <p class="scene-text">{{ item.scene_description }}</p>
-                      <blockquote class="script-text">{{ item.script }}</blockquote>
+                      <div class="script-block">
+                        <span class="script-label">脚本/字幕</span>
+                        <blockquote class="script-text">{{ formatShotScript(item) }}</blockquote>
+                      </div>
                     </div>
                   </article>
                 </div>
@@ -337,6 +366,7 @@ const analysisVersions = ref([])
 const selectedCompareModels = ref([])
 const historyList = ref([])
 const videoPreviewUrl = ref('')
+const videoUrlInput = ref('')
 const isLocalPreview = ref(false)
 const currentFileName = ref('')
 const activeAnalysisId = ref('')
@@ -344,6 +374,7 @@ const currentAnalysisModel = ref('')
 const reanalyzeModelType = ref('')
 const reanalyzingAnalysisId = ref('')
 const reanalyzingModel = ref('')
+const manualTranscript = ref('')
 const analysisStatusMap = ref({})
 const analysisVersion = ref(Date.now())
 const videoRef = ref(null)
@@ -608,6 +639,15 @@ const formatTime = (value) => {
   return `${minutes}:${remainSeconds}`
 }
 
+const formatShotScript = (item) => {
+  const script = String(item?.script || '').trim()
+  if (!script) return '该段无有效口播/字幕'
+  if (/^画面[\/／、和与]字幕摘要\s*[:：]/.test(script) || /^画面摘要\s*[:：]/.test(script)) {
+    return '该段无有效口播/字幕'
+  }
+  return script
+}
+
 const getImageUrl = (url) => `${url}?v=${analysisVersion.value}`
 
 const formatTaxonomyLabel = (primary, subtype) => {
@@ -650,6 +690,7 @@ const setVideoPreview = (url, local = false) => {
 const handleFileChange = (file) => {
   currentFile = file.raw
   currentFileName.value = file.name
+  videoUrlInput.value = ''
   fileList.value = [file]
   resultList.value = []
   analysisVersions.value = []
@@ -702,7 +743,20 @@ const seekToSegment = (item) => {
 }
 
 const startAnalyze = async () => {
-  if (!currentFile) {
+  const sourceVideoUrl = videoUrlInput.value.trim()
+  if (!currentFile && !sourceVideoUrl) {
+    ElMessage.warning('请上传视频，或粘贴 TikTok / Instagram / YouTube 视频链接')
+    return
+  }
+  if (currentFile && sourceVideoUrl) {
+    ElMessage.warning('请在上传视频和输入链接中选择一种方式')
+    return
+  }
+  if (sourceVideoUrl && !/^https?:\/\//i.test(sourceVideoUrl)) {
+    ElMessage.warning('视频链接需要以 http:// 或 https:// 开头')
+    return
+  }
+  if (!currentFile && !sourceVideoUrl) {
     ElMessage.warning('请上传视频')
     return
   }
@@ -713,9 +767,11 @@ const startAnalyze = async () => {
 
   loading.value = true
   const fd = new FormData()
-  fd.append('file', currentFile)
+  if (currentFile) fd.append('file', currentFile)
+  if (sourceVideoUrl) fd.append('video_url', sourceVideoUrl)
   fd.append('model', modelType.value)
   fd.append('async_mode', 'true')
+  if (manualTranscript.value.trim()) fd.append('transcript_override', manualTranscript.value.trim())
 
   try {
     const res = await axios.post('/api/analyze', fd, { timeout: 60000 })
@@ -730,6 +786,9 @@ const startAnalyze = async () => {
     console.error('analyze failed:', err)
     const detail = err?.response?.data?.detail || err?.response?.data?.msg || err?.message
     ElMessage.error(detail ? `解析失败：${detail}` : '解析失败')
+    if (sourceVideoUrl) {
+      ElMessage.warning('如果链接下载失败，请下载到本地后使用“上传视频”手动上传解析')
+    }
     loading.value = false
     clearJobState()
   }
@@ -780,6 +839,7 @@ const reanalyzeCurrent = async (model) => {
     setAnalysisStatus(targetAnalysisId, 'queued')
     const fd = new FormData()
     fd.append('model', targetModel)
+    if (manualTranscript.value.trim()) fd.append('transcript_override', manualTranscript.value.trim())
     const res = await axios.post(`/api/analyses/${targetAnalysisId}/reanalyze`, fd, { timeout: 60000 })
     currentJobId.value = res.data.job_id || ''
     jobStatus.value = res.data.status || 'queued'
@@ -903,6 +963,9 @@ const pollJobStatus = async (jobId, manual = false) => {
     jobStatus.value = job.status
     jobMessage.value = job.message || ''
     currentFileName.value = job.filename || currentFileName.value
+    if (job.video_url && !videoPreviewUrl.value) {
+      setVideoPreview(job.video_url, false)
+    }
     const affectedAnalysisId = job.replace_analysis_id || job.analysis_id || reanalyzingAnalysisId.value
     if (affectedAnalysisId && ['queued', 'processing', 'completed', 'failed', 'canceled'].includes(job.status)) {
       setAnalysisStatus(affectedAnalysisId, job.status)
@@ -1134,6 +1197,7 @@ const clearCurrentAnalysis = () => {
   reanalyzingAnalysisId.value = ''
   reanalyzingModel.value = ''
   currentFileName.value = ''
+  videoUrlInput.value = ''
   currentFile = null
   fileList.value = []
   setVideoPreview('', false)
@@ -1252,6 +1316,10 @@ onBeforeUnmount(() => {
   width: 220px;
 }
 
+.video-url-input {
+  width: min(420px, 48vw);
+}
+
 .file-strip {
   display: flex;
   gap: 10px;
@@ -1263,6 +1331,22 @@ onBeforeUnmount(() => {
 
 .file-strip strong {
   color: #263245;
+}
+
+.manual-transcript-panel {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.manual-transcript-panel h3 {
+  margin: 2px 0 0;
+  color: #1d2939;
+  font-size: 14px;
 }
 
 .job-panel {
@@ -1717,8 +1801,20 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.script-text {
+.script-block {
   margin: 0 0 12px;
+}
+
+.script-label {
+  display: block;
+  margin: 0 0 4px;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.script-text {
+  margin: 0;
   padding: 8px 12px;
   background: #fffaf0;
   border-left: 3px solid #f2b94b;
@@ -1812,6 +1908,10 @@ onBeforeUnmount(() => {
   }
 
   .model-select {
+    width: 100%;
+  }
+
+  .video-url-input {
     width: 100%;
   }
 

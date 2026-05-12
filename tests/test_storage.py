@@ -409,6 +409,52 @@ class AnalysisStorageTest(unittest.TestCase):
             self.assertEqual(updated["status"], "completed")
             self.assertEqual(main.get_analysis_job(job_id, db_path=db_path)["analysis_id"], "analysis-1")
 
+    def test_download_video_from_url_requires_ytdlp(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, "yt_dlp", None):
+            with self.assertRaises(main.VideoDownloadError) as ctx:
+                main.download_video_from_url("https://www.youtube.com/watch?v=demo", Path(tmp))
+
+        self.assertIn("手动上传视频文件", str(ctx.exception))
+
+    def test_download_video_from_url_maps_downloader_error_to_manual_upload_hint(self):
+        class FailingYoutubeDL:
+            def __init__(self, _options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                raise RuntimeError("HTTP Error 403: Forbidden")
+
+        fake_ytdlp = Mock()
+        fake_ytdlp.YoutubeDL = FailingYoutubeDL
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, "yt_dlp", fake_ytdlp):
+            with self.assertRaises(main.VideoDownloadError) as ctx:
+                main.download_video_from_url("https://www.tiktok.com/@demo/video/1", Path(tmp))
+
+        message = str(ctx.exception)
+        self.assertIn("平台拒绝下载请求", message)
+        self.assertIn("手动上传", message)
+
+    def test_persist_job_preview_video_copies_downloaded_video_for_polling_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloaded.mp4"
+            stored_dir = root / "stored"
+            source.write_bytes(b"video bytes")
+            stored_dir.mkdir()
+
+            with patch.object(main, "STORED_VIDEO_DIR", stored_dir):
+                preview_url = main.persist_job_preview_video("job-1", source, "demo video.mp4")
+
+            self.assertEqual(preview_url, "/storage/videos/job_job-1_demo_video.mp4")
+            self.assertEqual((stored_dir / "job_job-1_demo_video.mp4").read_bytes(), b"video bytes")
+
     def test_get_analysis_job_by_analysis_id_prefers_active_reanalysis_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "analysis.db"
@@ -463,6 +509,57 @@ class AnalysisStorageTest(unittest.TestCase):
         timing_kwargs = log_job.call_args_list[timing_index].kwargs
         self.assertRegex(timing_kwargs["video_to_audio"], r"^\d+\.\d{2}s$")
         self.assertRegex(timing_kwargs["subtitle_analysis"], r"^\d+\.\d{2}s$")
+
+    def test_run_analysis_pipeline_uses_manual_transcript_without_asr(self):
+        result = json.dumps([{"title": "开场", "start_time": 0, "end_time": 1}], ensure_ascii=False)
+        manual_transcript = "0.00 --> 3.08 Rule number one, read the reviews."
+        with patch.object(main, "extract_frames"), \
+             patch.object(main, "extract_audio") as extract_audio, \
+             patch.object(main, "audio_to_text") as audio_to_text, \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT") as build_prompt, \
+             patch.object(main, "print_final_prompt_for_debug"), \
+             patch.object(main, "analyze_video", return_value=result), \
+             patch.object(main, "enrich_storyboard_result", return_value=result), \
+             patch.object(main, "persist_analysis", return_value={"analysis_id": "analysis-1", "video_url": "", "data": []}), \
+             patch.object(main, "log_analysis_job") as log_job:
+            main.run_analysis_pipeline(
+                "/tmp/demo.mp4",
+                "demo.mp4",
+                "gemini-2.5-pro",
+                job_id="job-1",
+                transcript_override=manual_transcript,
+            )
+
+        extract_audio.assert_not_called()
+        audio_to_text.assert_not_called()
+        build_prompt.assert_called_once_with(manual_transcript, [])
+        self.assertIn("使用手动字幕，跳过音频提取和 ASR", [call.args[1] for call in log_job.call_args_list])
+
+    def test_run_analysis_pipeline_uses_empty_transcript_when_asr_fails(self):
+        result = json.dumps([{"title": "寮€鍦?", "start_time": 0, "end_time": 1}], ensure_ascii=False)
+        with patch.object(main, "extract_frames"), \
+             patch.object(main, "extract_audio", return_value=True), \
+             patch.object(main, "audio_to_text", side_effect=RuntimeError("asr crashed")) as audio_to_text, \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT") as build_prompt, \
+             patch.object(main, "print_final_prompt_for_debug"), \
+             patch.object(main, "analyze_video", return_value=result), \
+             patch.object(main, "enrich_storyboard_result", return_value=result), \
+             patch.object(main, "persist_analysis", return_value={"analysis_id": "analysis-1", "video_url": "", "data": []}):
+            main.run_analysis_pipeline("/tmp/demo.mp4", "demo.mp4", "gemini-2.5-pro", job_id="job-1")
+
+        audio_to_text.assert_called_once()
+        build_prompt.assert_called_once_with("", [])
+
+    def test_audio_to_text_returns_empty_when_asr_is_disabled(self):
+        with patch.object(main, "ENABLE_ASR", False), \
+             patch.object(main, "get_faster_whisper_model") as faster_model, \
+             patch.object(main, "get_whisper_model") as whisper_model:
+            self.assertEqual(main.audio_to_text(), "")
+
+        faster_model.assert_not_called()
+        whisper_model.assert_not_called()
 
     def test_cancel_analysis_job_marks_job_canceled_and_hides_internal_event(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -723,9 +820,12 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("视觉场景切换", prompt)
         self.assertIn("单个分镜时长不得超过 12 秒", prompt)
         self.assertIn("分镜数量要克制", prompt)
+        self.assertIn("产品对比", prompt)
+        self.assertIn("如果已经形成明确双对象比较，优先用“产品对比”", prompt)
         self.assertIn("多个连续片段都在围绕同一产品", prompt)
         self.assertIn("scene_description 至少 30 个中文字符", prompt)
-        self.assertIn("script 需要覆盖该段完整语义", prompt)
+        self.assertIn("script 需要覆盖该段完整口播/字幕语义", prompt)
+        self.assertIn("无有效口播/字幕", prompt)
         self.assertIn("不要把一句完整台词、因果句、转折句或从句拆到两个分镜里", prompt)
         self.assertIn("分镜时间边界可以围绕视觉切点前后微调", prompt)
         self.assertIn("卖点角度分类体系", prompt)
@@ -739,6 +839,20 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("护肤/护发/美妆/洗护 GRWM", prompt)
         self.assertIn("使用频率/适用状态", prompt)
         self.assertIn("开头的夸张情绪宣言", prompt)
+
+    def test_normalizes_comparison_story_step_to_product_comparison(self):
+        item = {
+            "title": "对比展示",
+            "content_tag": "竞品比较",
+            "scene_description": "画面把 Redhut 和 Bissell 两个蒸汽清洁器放在一起比较。",
+            "script": "Which is better? I compared it next to my Bissell steam shot.",
+        }
+
+        main.normalize_content_tag(item)
+        main.normalize_story_step_labels(item)
+
+        self.assertEqual(item["title"], "产品对比")
+        self.assertEqual(item["content_tag"], "产品对比")
 
     def test_enrich_normalizes_mirror_grwm_tryon_to_ritual_steps(self):
         model_result = json.dumps([
@@ -810,6 +924,149 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["formula_subtype"] == "仪式步骤型" for item in enriched))
         self.assertIn("使用频率", enriched[0]["category_reason"])
         self.assertIn("情绪钩子", enriched[0]["category_reason"])
+
+    def test_enrich_reclassifies_miraj_haircare_pov_as_grwm_product(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 6,
+                "title": "用户痛点",
+                "scene_description": "浴室镜头中男子展示头发稀疏和发际线问题，画面叠字为 POV: The anti baldness solution，建立防脱发护理需求。",
+                "script": "POV: The anti baldness solution",
+                "product_category": "护发",
+                "content_tag": "用户痛点",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "方法对比型",
+                "category_reason": "模型误把前后效果当成方法对比。",
+            },
+            {
+                "start_time": 6,
+                "end_time": 12,
+                "title": "产品亮相",
+                "scene_description": "男子拿出 MIRAJ 品牌黑色 ANTI-DHT SHAMPOO 和白色瓶装产品，随后用刷子涂抹黑色膏体并清洗起泡。",
+                "script": "无有效口播/字幕",
+                "product_category": "护发",
+                "content_tag": "产品亮相",
+                "viral_formula": "第一人称视角",
+                "formula_subtype": "过程演示型",
+                "category_reason": "模型误把 POV 文案当作第一人称主类。",
+            },
+            {
+                "start_time": 12,
+                "end_time": 18,
+                "title": "产品功效",
+                "scene_description": "最后展示使用后头顶覆盖和发量观感效果，强调 anti baldness solution 的最终结果。",
+                "script": "无有效口播/字幕",
+                "product_category": "护发",
+                "content_tag": "产品功效",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+                "category_reason": "模型误把前后变化当成分屏对比。",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/miraj.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "GRWM + 产品" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "仪式步骤型" for item in enriched))
+        self.assertIn("POV 文案", enriched[0]["category_reason"])
+
+    def test_enrich_does_not_mark_same_item_color_split_as_alternative_or_before_after(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 2,
+                "title": "产品信息",
+                "scene_description": "年轻女士身着粉色长袍 abaya 在客厅全身展示，露出柔和色调和垂坠感。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品信息",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "category_reason": "模型误把不同颜色当成平替。",
+            },
+            {
+                "start_time": 2,
+                "end_time": 4,
+                "title": "产品差异",
+                "scene_description": "画面切换为左右分屏，同款长袍分别展示粉色和灰色，突出不同颜色和姿态差异。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品差异",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+                "category_reason": "模型误把同款颜色分屏当成使用前后。",
+            },
+            {
+                "start_time": 4,
+                "end_time": 7,
+                "title": "产品信息",
+                "scene_description": "女士继续穿灰色长袍微笑展示动态姿态，画面延续同款服装的颜色和上身观感展示。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品信息",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "category_reason": "模型误把同款不同色当成平替对决。",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/abaya.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "分屏对比" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "产品对比型" for item in enriched))
+        self.assertIn("不同颜色", enriched[0]["category_reason"])
+        self.assertNotIn("平替", enriched[0]["formula_subtype"])
+        self.assertNotIn("前后", enriched[0]["formula_subtype"])
+
+    def test_enrich_reclassifies_abaya_grwm_split_to_split_product_comparison(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 2,
+                "title": "产品信息",
+                "scene_description": "女性身穿粉色长款连衣裙和配套头巾站在室内展示，画面重点是同款服装的上身效果和整体垂坠感。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品信息",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "仪式步骤型",
+                "category_reason": "模型误把服装展示当成 GRWM 准备流程。",
+            },
+            {
+                "start_time": 2,
+                "end_time": 4,
+                "title": "产品对比",
+                "scene_description": "同一位女性穿同款但为灰色的长款连衣裙，画面通过左右分屏和快速切换对照粉色与灰色两种颜色。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品对比",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "仪式步骤型",
+                "category_reason": "模型误把同款不同颜色对照当作仪式步骤。",
+            },
+            {
+                "start_time": 4,
+                "end_time": 8,
+                "title": "产品差异",
+                "scene_description": "粉色与灰色两款同款 abaya 上身效果通过快速交叉剪辑呈现，突出不同颜色和姿态的视觉差异。",
+                "script": "无有效口播/字幕",
+                "product_category": "服装",
+                "content_tag": "产品差异",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "仪式步骤型",
+                "category_reason": "模型未识别这是同款商品变体对照。",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/abaya.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "分屏对比" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "产品对比型" for item in enriched))
+        self.assertIn("分屏对照展示", enriched[0]["category_reason"])
 
     def test_enrich_adds_selling_point_and_golden_3s_taxonomy(self):
         model_result = json.dumps([
