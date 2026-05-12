@@ -55,6 +55,7 @@ GPTPROTO_API_KEY = os.getenv("GPTPROTO_API_KEY", BRAIN_API_KEY)
 BRAIN_BASE_URL = os.getenv("BRAIN_BASE_URL", "https://gptproto.com/v1")
 BRAIN_MODEL = os.getenv("BRAIN_MODEL", "gemini-2.5-pro")
 GPTPROTO_VISION_MODEL = os.getenv("GPTPROTO_VISION_MODEL", "gpt-4o")
+GPTPROTO_CLAUDE_MODEL = os.getenv("GPTPROTO_CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
 # ==========================================================
 
@@ -68,6 +69,12 @@ MODEL_OPTIONS = [
     {
         "label": "gpt-4o",
         "value": "gpt-4o",
+        "required_key": "GPTPROTO_API_KEY",
+        "implemented": True,
+    },
+    {
+        "label": "claude-sonnet-4-5-20250929",
+        "value": "claude-sonnet-4-5-20250929",
         "required_key": "GPTPROTO_API_KEY",
         "implemented": True,
     },
@@ -91,7 +98,8 @@ MODEL_OPTIONS = [
     },
 ]
 
-BASE_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = Path(__file__).resolve().parent
+BASE_DIR = BACKEND_DIR.parent
 TEMP_VIDEO_DIR = BASE_DIR / "videos"
 TEMP_FRAME_DIR = BASE_DIR / "frames"
 STORAGE_DIR = BASE_DIR / "storage"
@@ -108,7 +116,8 @@ app.mount("/storage", StaticFiles(directory=str(STORAGE_DIR)), name="storage")
 
 _whisper_model = None
 _faster_whisper_model = None
-analysis_jobs = {}
+# 任务状态已迁移到 SQLite，这里只保留取消事件（内存线程对象无法持久化）
+job_cancel_events = {}
 analysis_jobs_lock = threading.Lock()
 analysis_pipeline_lock = threading.Lock()
 
@@ -145,6 +154,7 @@ PATTERN_TAXONOMY = """
 - 情感叙事型：个人困扰、身体变化、外貌焦虑、生活状态或自我改善驱动产品出现。
 - 产品对决型：在个人使用场景中比较不同产品、不同效果或不同选择。
 补充判断：如果是镜前 GRWM POV / 对镜自拍试穿，创作者按正面亮相、侧身/背面转身、版型/洗水/剪裁/尺码/购买信息这样的固定顺序展示单件服装，优先判为“仪式步骤型”，不要创造“穿搭展示型”等体系外小类。
+补充判断：如果是护肤/护发/美妆/洗护产品嵌入个人护理流程，字幕或画面包含使用频率、使用顺序、按摩/涂抹/清洗等操作步骤、成分说明、使用后体验中的至少两类，优先判为“仪式步骤型”。即使开头有强情绪钩子或个人困扰，也不要仅凭开头判为“情感叙事型”；情感只作为黄金3秒或分镜标题处理。
 
 4. 分屏对比
 适用判断：左右分屏、前后对比、有无产品对比、竞品/平替对比、淘汰赛式测试；核心是直观证明差异。
@@ -214,7 +224,7 @@ MARKETING_TACTIC_TAXONOMY = """
 
 4. 制造紧迫感
 - 库存警告：产品即将售罄、此前已售罄、刚补货、库存有限或快没了。
-- 限时折扣：即将过期的折扣、coupon、deal、today only、right now 等促销时效。
+- 限时折扣：即将过期的折扣、coupon、deal、today only、倒计时、截止日期等促销时效。仅出现 sale、price、right now 但没有时间限制或库存压力时，优先归为价格优势。
 - 渠道独占：强调只有 TikTok Shop、直播间、某渠道或当前链接可以买到。
 - 社证加速：用近期高购买量、评论区催促、爆单、榜单等制造跟风压力。
 
@@ -230,6 +240,7 @@ MARKETING_TACTIC_TAXONOMY = """
 - 日均成本拆解：把总价拆成日均、每次、每份、每件或 per serving 的小成本。
 - 平替发现：把发现平价替代品、dupe、alternative 包装成寻宝式胜利。
 - 直接比价：把两个产品、品牌或方案与价格标签并排展示，证明更低价格获得相似品质。
+- 普通折扣价：强调原价、全价、很少打折、现在 sale price 或 look at the price 的划算感，但没有明确倒计时或库存稀缺。
 
 7. 贩卖生活方式
 - 圈层标识：把产品包装为属于某个社群、风格圈层、亚文化或人群身份的标识。
@@ -266,6 +277,7 @@ MARKETING_TACTIC_TAXONOMY = """
 - 捷径承诺：承诺用更快、更省事、更少步骤的方法实现某个结果。
 - 稀缺框架：声称只有少数人知道、很少人会说、别让太多人知道。
 - 生活妙招：以编号技巧清单、实用 hack、便宜好物清单或快速做法开场。
+注意：普通“我来告诉你这个 sale”不算省钱秘笈；必须有隐藏路径、避坑经验、购买技巧、折扣入口或反常识省钱方法。
 
 4. 震撼数据
 - 逆认知数据：用数据直接反驳大众观点、常见误区或直觉判断。
@@ -312,7 +324,7 @@ def normalize_json_text(text):
     return cleaned
 
 
-def init_db(db_path=DB_PATH):
+def init_db(db_path=DB_PATH, mark_interrupted_jobs=False):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -356,13 +368,86 @@ def init_db(db_path=DB_PATH):
             FROM analyses
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'queued',
+                filename TEXT,
+                model TEXT,
+                message TEXT,
+                analysis_id TEXT,
+                video_url TEXT,
+                replace_analysis_id TEXT,
+                cancel_requested INTEGER DEFAULT 0,
+                timing_json TEXT,
+                data TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if mark_interrupted_jobs:
+            # 清理旧的无主任务：如果后端重启了，之前 processing/queued 的任务已经死了。
+            conn.execute(
+                """
+                UPDATE analysis_jobs
+                SET status = 'failed',
+                    message = '后端重启，任务中断',
+                    updated_at = ?
+                WHERE status IN ('queued', 'processing')
+                """,
+                (datetime.now(timezone.utc).isoformat(),)
+            )
         conn.commit()
     finally:
         conn.close()
 
 
+def _job_row_to_dict(row):
+    if not row:
+        return None
+    record = dict(row)
+    record["cancel_requested"] = bool(record.get("cancel_requested", 0))
+    # 解析 JSON 字段
+    val = record.pop("timing_json", None)
+    if val and isinstance(val, str):
+        try:
+            record["timing"] = json.loads(val)
+        except json.JSONDecodeError:
+            record["timing"] = None
+    val = record.pop("data", None)
+    if val and isinstance(val, str):
+        try:
+            record["data"] = json.loads(val)
+        except json.JSONDecodeError:
+            pass
+    return record
+
+
 def _row_to_dict(row):
     return dict(row) if row else None
+
+
+def _pending_job_to_history_record(job):
+    return {
+        "id": job["job_id"],
+        "job_id": job["job_id"],
+        "is_pending_job": True,
+        "status": job["status"],
+        "message": job.get("message") or "",
+        "filename": job.get("filename") or "未命名视频",
+        "model": job.get("model") or "",
+        "video_url": job.get("video_url") or "",
+        "formula": "",
+        "subtype": "",
+        "category_reason": job.get("message") or "",
+        "created_at": job.get("created_at") or job.get("updated_at") or "",
+        "shot_count": 0,
+        "cover_url": "",
+        "models": [job["model"]] if job.get("model") else [],
+        "model_count": 1 if job.get("model") else 0,
+    }
 
 
 @contextmanager
@@ -555,6 +640,17 @@ def fetch_analysis_list(db_path=DB_PATH):
             ORDER BY created_at DESC
             """
         ).fetchall()
+        pending_job_rows = conn.execute(
+            """
+            SELECT job_id, status, filename, model, message, analysis_id,
+                   video_url, created_at, updated_at
+            FROM analysis_jobs
+            WHERE status IN ('queued', 'processing')
+              AND replace_analysis_id IS NULL
+              AND analysis_id IS NULL
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
 
     models_by_analysis = {}
     for row in version_rows:
@@ -565,10 +661,14 @@ def fetch_analysis_list(db_path=DB_PATH):
     records = []
     for row in rows:
         record = _row_to_dict(row)
-        record["shot_count"] = len(parse_result_items(record.pop("result_json", "[]")))
+        result_items = parse_result_items(record.pop("result_json", "[]"))
+        record["shot_count"] = len(result_items)
+        record["cover_url"] = next((item.get("image_url", "") for item in result_items if item.get("image_url")), "")
         record["models"] = models_by_analysis.get(record["id"], [record["model"]])
         record["model_count"] = len(record["models"])
         records.append(record)
+    records.extend(_pending_job_to_history_record(_row_to_dict(row)) for row in pending_job_rows)
+    records.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     return records
 
 
@@ -699,20 +799,82 @@ def persist_analysis(video_path, original_filename, model, result_json):
     }
 
 
-def update_analysis_job(job_id, **updates):
+def update_analysis_job(job_id, db_path=DB_PATH, **updates):
     with analysis_jobs_lock:
-        current = analysis_jobs.setdefault(job_id, {})
-        if current.get("status") == "canceled" and updates.get("status") != "canceled":
-            return sanitize_analysis_job(current)
-        current.update(updates)
-        current["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return sanitize_analysis_job(current)
+        with _connect_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            current = _job_row_to_dict(row)
+            # 如果任务已被取消，且本次更新不是取消操作，则拒绝更新
+            if current.get("status") == "canceled" and updates.get("status") != "canceled":
+                return sanitize_analysis_job(current)
+
+            now = datetime.now(timezone.utc).isoformat()
+            allowed_fields = {
+                "status", "message", "analysis_id", "video_url",
+                "replace_analysis_id", "cancel_requested", "timing_json", "data", "model"
+            }
+            field_mapping = {"timing": "timing_json"}
+            set_clauses = []
+            values = []
+            for key, value in updates.items():
+                db_key = field_mapping.get(key, key)
+                if db_key in allowed_fields:
+                    set_clauses.append(f"{db_key} = ?")
+                    if db_key == "timing_json" and isinstance(value, (dict, list)):
+                        values.append(json.dumps(value, ensure_ascii=False))
+                    elif db_key == "cancel_requested":
+                        values.append(1 if value else 0)
+                    else:
+                        values.append(value)
+            if not set_clauses:
+                return sanitize_analysis_job(current)
+
+            set_clauses.append("updated_at = ?")
+            values.append(now)
+            values.append(job_id)
+
+            conn.execute(
+                f"UPDATE analysis_jobs SET {', '.join(set_clauses)} WHERE job_id = ?",
+                values,
+            )
+            conn.commit()
+
+            new_row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            return sanitize_analysis_job(_job_row_to_dict(new_row))
 
 
-def get_analysis_job(job_id):
+def get_analysis_job(job_id, db_path=DB_PATH):
     with analysis_jobs_lock:
-        job = analysis_jobs.get(job_id)
-        return sanitize_analysis_job(job) if job else None
+        with _connect_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            return sanitize_analysis_job(_job_row_to_dict(row))
+
+
+def get_analysis_job_by_analysis_id(analysis_id, db_path=DB_PATH):
+    with analysis_jobs_lock:
+        with _connect_db(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM analysis_jobs
+                WHERE analysis_id = ? OR replace_analysis_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (analysis_id, analysis_id),
+            ).fetchall()
+        if not rows:
+            return None
+        jobs = [sanitize_analysis_job(_job_row_to_dict(r)) for r in rows]
+        active_jobs = [j for j in jobs if not is_terminal_job_status(j.get("status"))]
+        candidates = active_jobs or jobs
+        return candidates[0]
 
 
 def sanitize_analysis_job(job):
@@ -723,50 +885,79 @@ def is_terminal_job_status(status):
     return status in {"completed", "failed", "canceled"}
 
 
-def cancel_analysis_job(job_id):
+def cancel_analysis_job(job_id, db_path=DB_PATH):
     with analysis_jobs_lock:
-        job = analysis_jobs.get(job_id)
-        if not job:
-            return None
-        if is_terminal_job_status(job.get("status")):
-            return sanitize_analysis_job(job)
+        with _connect_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            job = _job_row_to_dict(row)
+            if is_terminal_job_status(job.get("status")):
+                return sanitize_analysis_job(job)
 
-        cancel_event = job.get("_cancel_event")
-        if cancel_event:
-            cancel_event.set()
-        job["cancel_requested"] = True
-        job["status"] = "canceled"
-        job["message"] = "任务已取消，后台正在停止当前处理"
-        job["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return sanitize_analysis_job(job)
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE analysis_jobs
+                SET cancel_requested = 1,
+                    status = 'canceled',
+                    message = '任务已取消，后台正在停止当前处理',
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (now, job_id),
+            )
+            conn.commit()
+
+            new_row = conn.execute(
+                "SELECT * FROM analysis_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            result = sanitize_analysis_job(_job_row_to_dict(new_row))
+
+    # 触发内存中的取消事件（让正在运行的线程感知到）
+    event = job_cancel_events.get(job_id)
+    if event:
+        event.set()
+    return result
 
 
-def check_analysis_cancelled(job_id):
+def check_analysis_cancelled(job_id, db_path=DB_PATH):
     if not job_id:
         return
     with analysis_jobs_lock:
-        job = analysis_jobs.get(job_id)
-        cancel_event = job.get("_cancel_event") if job else None
-        canceled = bool(job and (job.get("cancel_requested") or (cancel_event and cancel_event.is_set())))
-    if canceled:
+        # 查数据库标志位
+        with _connect_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT cancel_requested, status FROM analysis_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            db_canceled = bool(row and (row["cancel_requested"] or row["status"] == "canceled"))
+        # 查内存事件
+        event = job_cancel_events.get(job_id)
+        event_canceled = bool(event and event.is_set())
+    if db_canceled or event_canceled:
         raise AnalysisCancelled("任务已取消")
 
 
-def create_analysis_job(filename, model):
+def create_analysis_job(filename, model, db_path=DB_PATH):
     job_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     with analysis_jobs_lock:
-        analysis_jobs[job_id] = {
-            "job_id": job_id,
-            "status": "queued",
-            "filename": filename,
-            "model": model,
-            "message": "任务已提交，等待后台分析",
-            "created_at": now,
-            "updated_at": now,
-            "cancel_requested": False,
-            "_cancel_event": threading.Event(),
-        }
+        with _connect_db(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO analysis_jobs (
+                    job_id, status, filename, model, message,
+                    cancel_requested, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (job_id, "queued", filename, model, "任务已提交，等待后台分析", now, now),
+            )
+            conn.commit()
+        # 内存里给这个 job 准备一个取消事件
+        job_cancel_events[job_id] = threading.Event()
     return job_id
 
 
@@ -801,7 +992,7 @@ def prepare_reanalysis_job(analysis_id, model=None, db_path=DB_PATH, job_upload_
     }
 
 
-init_db()
+init_db(mark_interrupted_jobs=True)
 
 
 def parse_time_value(value, fallback=0.0):
@@ -901,6 +1092,28 @@ def build_gptproto_messages(prompt, visual_frames):
     return [{"role": "user", "content": content}]
 
 
+def build_gptproto_claude_messages(prompt, visual_frames):
+    if not visual_frames:
+        return [{"role": "user", "content": prompt}]
+
+    content = [{"type": "text", "text": prompt}]
+    for frame in visual_frames:
+        frame_id = frame.get("id") or "frame"
+        content.append({
+            "type": "text",
+            "text": f"{frame_id}，时间：{frame.get('timestamp', 0)}s。请只描述这张图中能明确看到的商品和颜色。",
+        })
+        content.append({
+            "type": "file",
+            "file": {
+                "filename": f"{safe_storage_key(frame_id)}.jpg",
+                "file_data": frame["data_url"],
+            },
+        })
+
+    return [{"role": "user", "content": content}]
+
+
 def build_gptproto_responses_input(prompt, visual_frames):
     content = [{"type": "input_text", "text": prompt}]
     for frame in visual_frames:
@@ -958,7 +1171,8 @@ def build_analysis_prompt(transcript, visual_frames=None):
 如果画面显示服装试穿、穿搭展示、换装、转身展示版型，请识别为服饰/穿搭相关内容，不要写成护肤品、清洁用品或其他画面中不存在的品类。
 每个分镜必须绑定一个 evidence_frame 和 evidence_timestamp，描述只能来自该分镜证据帧附近的画面，不要把其他关键帧里的颜色、款式、商品串到当前分镜。
 如果关键帧中只有画面展示、没有真实口播销售词，script 字段写“画面/字幕摘要”，不要编造创作者说过的推销话术。
-服装试穿、开箱 haul 类视频请优先按“叙事阶段/核心转化目的”拆分，而不是按每一句口播或每个小动作拆分。同一商品的不同尺码讨论、颜色展示、多个角度展示、连续试穿反馈，除非转化目的明显变化，否则应合并为一个分镜。
+服装试穿、开箱 haul 类视频请优先按“叙事阶段/核心转化目的”拆分，而不是按每一句口播或每个小动作拆分；同一商品的不同尺码讨论、颜色展示、多个角度展示、连续试穿反馈，除非转化目的明显变化，否则应合并为一个分镜。
+但视觉场景切换（如从单人试穿切换到两个产品同框对比、从清洁特写切换到手持手机展示价格页面、从室内场景切换到室外场景）始终优先于叙事目的合并，必须拆分为独立分镜。
 """ if visual_frames else """
 你只会收到音频转写，因此如果字幕内容像背景音乐歌词、缺少商品信息，请在分类和分镜中保持保守，不要编造画面里不存在的产品。
 """
@@ -980,8 +1194,19 @@ def build_analysis_prompt(transcript, visual_frames=None):
 3. formula_subtype 必须从该大类的小类中选择，不要创造新小类。
 4. 小类只用于判断视频形态，不代表固定步骤顺序；不要为了套小类而强行补不存在的段落。
 5. 分镜步骤从“全局叙事步骤词库”里选择，按视频真实出现顺序标注；一个视频可以只出现其中一部分步骤，也可以重复出现某类步骤。
-6. 请进行阶段化分镜拆解，不要逐句切分，也不要因为轻微动作、站位、镜头角度或同一商品的重复展示变化就拆成新分镜。只有当核心转化目的发生变化时才拆分，例如从开场悬念转到优惠机制、从优惠机制转到产品展示、从产品展示转到试穿反馈、从试穿反馈转到行动号召。一个 2 分钟左右的视频通常拆成 5-8 个分镜，最多不超过 9 个；宁可把同一目的下的连续口播合并成 15-35 秒的完整段落，也不要拆成多个 5-8 秒的小段。
-7. 对开箱 haul / 服装试穿类视频，优先参考这种阶段链路：故事开场/情绪营销 → 优惠活动或购买动机 → 产品卖点/产品信息 → 试穿或真实体验 → 行动号召。同一阶段里出现多个相近款式、颜色、尺码或重复评价时，应合并概括。
+6. 分镜切分优先级（从高到低）：
+   第一优先：视觉场景切换。当画面出现以下任一变化时，必须切分为新分镜，无论口播是否结束、无论叙事目的是否相同：
+   - 拍摄主体变化（如从"产品A特写"切换到"产品A+B同框"）
+   - 镜头景别/机位变化（如从特写切换到全景、从第一人称切换到桌面平拍）
+   - 场景空间变化（如从浴室切换到厨房）
+   - 新的关键视觉元素进入画面（如手持手机、价格标签、文字贴纸、分屏对比画面、新的人物或物体）
+
+   第二优先：叙事目的切换。当核心转化目的发生变化时切分（如从开场悬念转到优惠机制、从优惠机制转到产品展示、从产品展示转到试穿反馈、从试穿反馈转到行动号召）。
+
+   第三优先：时间上限。单个分镜时长不得超过 12 秒；若 12 秒内无视觉或目的切换，再按口播语义或动作节奏切分。
+
+   注意：禁止因"口播叙事完整"或"同一转化目的"而将两个明显不同的视觉画面合并为同一分镜。
+7. 对开箱 haul / 服装试穿类视频，优先参考这种阶段链路：故事开场/情绪营销 → 优惠活动或购买动机 → 产品卖点/产品信息 → 试穿或真实体验 → 行动号召。同一阶段里出现多个相近款式、颜色、尺码或重复评价时，应合并概括。但此链路仅用于叙事分析参考，不用于覆盖视觉切换优先的切分规则。
 8. 如果字幕里有西语、英语或其他语言，script 保留原语言；中文只写在分析字段里。
 9. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
 10. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
@@ -989,7 +1214,9 @@ def build_analysis_prompt(transcript, visual_frames=None):
 12. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
 13. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
 
-短视频分镜补充规则：对 12-30 秒的镜前 GRWM POV / 服装试穿短视频，不要因为全片都在展示同一件衣服就合并成 1 个分镜；如果画面或字幕依次出现开场情绪/亮相、多角度转身展示、版型/洗水/剪裁/尺码/购买码/链接等不同转化目的，通常拆成 3-4 个分镜。典型结构是：0-3 秒情绪营销或故事开场 → 中段优惠活动/购买动机或多角度展示 → 后段产品卖点/真实体验/行动号召。镜前 GRWM POV 单品试穿优先判为“GRWM + 产品 / 仪式步骤型”，不要创造“穿搭展示型”等体系外小类。
+短视频分镜补充规则：对 12-30 秒的镜前 GRWM POV / 服装试穿短视频，不要因为全片都在展示同一件衣服就合并成 1 个分镜；如果画面或字幕依次出现开场情绪/亮相、多角度转身展示、版型/洗水/剪裁/尺码/购买码/链接等不同转化目的，通常拆成 3-4 个分镜。典型结构是：0-3 秒情绪营销或故事开场 → 中段优惠活动/购买动机或多角度展示 → 后段产品卖点/真实体验/行动号召。镜前 GRWM POV 单品试穿优先判为“GRWM + 产品 / 仪式步骤型”，不要创造“穿搭展示型”等体系外小类。注意：30-60 秒视频按视觉切换通常拆成 4-6 个分镜；60-120 秒拆成 6-10 个。禁止为了凑数量而合并视觉切换。
+
+护肤/护发/美妆/洗护 GRWM 补充规则：如果主体内容是“使用频率/适用状态 → 操作步骤（按摩、涂抹、清洗、梳理等）→ 成分或功效 → 使用后体验/促销”，优先判为“GRWM + 产品 / 仪式步骤型”。开头的夸张情绪宣言、痛点表达或个人偏好只算情绪营销/黄金3秒钩子，不能覆盖全片小类。
 
 输出格式：
 [
@@ -1029,7 +1256,7 @@ def build_analysis_prompt(transcript, visual_frames=None):
 - 每个分镜的 conversion_point 必须具体到“为什么让用户更想买/更信任/更省钱/更理解差异”，不要写空泛的“促进转化”。
 - selling_point_angle 和 selling_point_subtype 必须严格从“卖点角度分类体系”选择；selling_point_reason 要说明它解决的是信任、效果、省事、紧迫、安全、省钱还是生活方式想象。
 - golden_3s_hook 和 golden_3s_subtype 只有在开头存在明确钩子时才从“黄金3秒钩子分类体系”选择；如果只是普通场景铺垫、产品自然出现、平铺直叙或无法判断，三个 golden_3s_* 字段都留空。golden_3s_reason 只能依据开头约 0-3 秒或最早分镜，不能引用后半段内容。
-- content_tag 以该段核心转化作用为准。只要该段提到便宜购买方法、优惠、折扣、deal、sale、coupon、price、save、link、shop、cart、购买路径或下单引导，即使画面里也在展示产品，也优先标为“优惠活动”或“价格促销”，不要标为“产品信息”。
+- content_tag 以该段核心转化作用为准。只要该段提到便宜购买方法、优惠、折扣、deal、sale、coupon、price、save、link、shop、cart、购买路径或下单引导，优先标为“优惠活动”或“价格促销”，不要标为“产品信息”。但如果该段同时存在明显视觉切换（如手持手机展示价格页面、商店货架特写），优先按视觉边界拆分为独立分镜，再分别标注 content_tag。
 - 如果画面或字幕出现“X vs Y”、“Which is better?”、“哪个更好”、竞品并列、两个产品同框比较、胜负结果、winner、价格/成分/功能对照，这类段落优先标为“产品差异”或“卖点对比”，不要标为“产品信息”或“产品亮相”。
 - 对比类视频的开头即使只是展示两个产品，只要同时出现 vs/which is better/对比问题，也应视为“产品差异”，因为它承担的是建立对比对象和选择悬念。
 - 只有出现明确双对象/双方案对比，且包含 cheaper、cheap、dupe、alternative、save money、price、per serving、cost、same look、same quality、平替/贵价/大牌/竞品等替代价值表达时，formula_subtype 才优先选择“平替对决型”。单一品牌开箱中提到 sale、kids size、cheaper 只能作为“优惠活动/价格促销”分镜，不得覆盖“开箱 / ASMR”的主类判断。
@@ -1040,12 +1267,24 @@ def build_analysis_prompt(transcript, visual_frames=None):
 - 不要把某个小类的示例流程当作硬性模板；title/content_tag 必须来自视频真实内容。
 - title 和 content_tag 只能从“全局叙事步骤词库”中选择，严禁输出“多角度展示、转身展示、结束展示、服装试穿与展示、穿搭展示”等动作描述型或自造类型；这些画面动作应写进 scene_description，分镜类型要归一为“情绪营销/优惠活动/产品卖点/真实体验/行动号召”等标准步骤。
 
+### 视觉切分强制触发示例
+以下画面变化出现时，即使口播仍在继续，也必须拆分为独立分镜：
+- 画面从"严重水垢的淋浴头特写" → 切换为"两个蒸汽清洁器并排摆放"：必须切分
+- 画面从"单一产品使用" → 切换为"手持手机展示 TikTok Shop 价格页面"：必须切分
+- 画面从"清洁动作特写" → 切换为"商店货架/产品包装盒全景"：必须切分
+- 画面中出现新的文字贴纸/价格标签/分屏对比框：必须切分
+
 字幕内容：
 {transcript}
 """
 
 
 def normalize_content_tag(item):
+    # 如果模型已经输出了有效的 content_tag，优先保留，不做强制覆盖
+    current_tag = str(item.get("content_tag", "")).strip()
+    if current_tag in ALLOWED_STORY_STEPS:
+        return item
+
     text = " ".join([
         str(item.get("title", "")),
         str(item.get("scene_description", "")),
@@ -1062,6 +1301,7 @@ def normalize_content_tag(item):
         item["content_tag"] = "优惠活动"
         if not item.get("conversion_point"):
             item["conversion_point"] = "通过价格、优惠或购买路径降低决策门槛"
+        return item
 
     contrast_keywords = [
         " vs ", "vs.", "对比", "哪个更好", "哪一个更好", "更好", "差异", "区别", "比较", "胜出", "winner",
@@ -1071,6 +1311,7 @@ def normalize_content_tag(item):
         item["content_tag"] = "产品差异"
         if not item.get("conversion_point"):
             item["conversion_point"] = "通过并列比较建立产品选择理由"
+        return item
 
     return item
 
@@ -1182,7 +1423,7 @@ def infer_selling_point_taxonomy(text):
             "制造紧迫感",
             [
                 ("库存警告", ["sold out", "stock", "restock", "库存", "补货", "抢", "快没了", "售罄"]),
-                ("限时折扣", ["limited-time", "limited time", "today only", "right now", "coupon", "deal", "限时", "现在", "今天", "优惠券", "折扣"]),
+                ("限时折扣", ["limited-time", "limited time", "today only", "expires", "ends tonight", "last chance", "coupon", "deal ends", "限时", "截止", "倒计时", "今天结束", "最后机会", "优惠券"]),
                 ("渠道独占", ["only on", "exclusive", "tiktok shop only", "独家", "渠道", "直播间", "当前链接"]),
                 ("社证加速", ["viral", "everyone is buying", "bestseller", "爆单", "都在买", "榜单", "跟风"]),
             ],
@@ -1205,7 +1446,7 @@ def infer_selling_point_taxonomy(text):
                 ("替代价值", ["replace", "instead of", "all in one", "替代多个", "一支搞定", "省下", "总节省"]),
                 ("日均成本拆解", ["per serving", "per use", "per day", "cost breakdown", "每份", "每次", "每天", "单价", "成本"]),
                 ("平替发现", ["dupe", "alternative", "same look", "same quality", "平替", "替代", "同款", "贵价", "发现"]),
-                ("直接比价", ["cheap", "cheaper", "sale", "price", "under $", "便宜", "低价", "比价", "价格标签"]),
+                ("直接比价", ["cheap", "cheaper", "sale", "price", "full price", "on sale", "never on sale", "look at the price", "under $", "便宜", "低价", "比价", "价格标签", "原价", "全价", "打折", "划算"]),
             ],
             "通过价格、成本或折扣降低购买阻力。",
         ),
@@ -1262,12 +1503,9 @@ def _opening_story_text(items):
     parts = []
     for item in opening_items:
         parts.extend([
-            str(item.get("title", "")),
             str(item.get("scene_description", "")),
             str(item.get("script", "")),
-            str(item.get("content_tag", "")),
             str(item.get("visual_tactic", "")),
-            str(item.get("conversion_point", "")),
         ])
     return " ".join(parts).lower()
 
@@ -1378,12 +1616,23 @@ def normalize_marketing_taxonomies(items):
     for item in items:
         if not isinstance(item, dict):
             continue
-        for key, value in selling.items():
-            if not item.get(key):
+        current_angle = item.get("selling_point_angle", "")
+        should_override_selling = (
+            not current_angle
+            or (current_angle == "制造紧迫感" and selling.get("selling_point_angle") == "价格优势")
+        )
+        if should_override_selling:
+            for key, value in selling.items():
                 item[key] = value
-        for key, value in golden_3s.items():
-            if not item.get(key):
-                item[key] = value
+
+        if golden_3s.get("golden_3s_hook"):
+            for key, value in golden_3s.items():
+                if not item.get(key):
+                    item[key] = value
+        else:
+            item["golden_3s_hook"] = ""
+            item["golden_3s_subtype"] = ""
+            item["golden_3s_reason"] = ""
     return items
 
 
@@ -1398,7 +1647,6 @@ def _combined_story_text(items):
             str(item.get("script", "")),
             str(item.get("content_tag", "")),
             str(item.get("visual_tactic", "")),
-            str(item.get("conversion_point", "")),
         ])
     return " ".join(parts).lower()
 
@@ -1414,11 +1662,12 @@ def should_reclassify_as_alternative_showdown(items):
         "童码", "儿童码", "成人码", "尺码", "dupe", "alternative", "cheaper", "cheap",
         "affordable", "expensive", "save money", "save", "same look", "same quality",
         "instead of", "rather than", "kid size", "kid sizes", "kids size", "kids sizes",
+        "bissell", "redhut", "red-hut", "steam shot", "viral",
     ]
     comparison_keywords = [
         " vs ", "vs.", "versus", "which is better", "哪个更好", "哪一个更好", "对比",
         "比较", "差异", "区别", "compare", "comparison", "better than", "instead of",
-        "rather than", "winner", "胜出",
+        "rather than", "winner", "胜出", "compared", "next to",
     ]
     before_after_keywords = [
         "使用前后", "前后效果", "before and after", "有无产品", "半边脸", "半边画面",
@@ -1511,23 +1760,79 @@ def normalize_grwm_ritual_tryon(items):
     return items
 
 
+def should_classify_as_grwm_ritual_care_routine(items):
+    text = _combined_story_text(items)
+    if not text.strip():
+        return False
+
+    grwm_or_care_hits = _keyword_hits(text, [
+        "grwm", "get ready", "routine", "rutina", "mirror", "bathroom", "shower",
+        "护肤", "护发", "美妆", "洗护", "护理", "浴室", "镜前", "头皮", "头发",
+        "hair", "cabello", "cuero cabelludo", "scalp", "skin", "piel",
+    ])
+    product_hits = _keyword_hits(text, [
+        "product", "spray", "serum", "cream", "oil", "mask", "minoxidil", "keratin", "keratina",
+        "jengibre", "ginger", "shampoo", "conditioner", "喷雾", "精华", "面霜", "发膜", "洗发水",
+        "护发素", "米诺地尔", "角蛋白", "生姜", "成分",
+    ])
+    frequency_hits = _keyword_hits(text, [
+        "cada tres días", "cada dos días", "diario", "every day", "daily", "every two days",
+        "every three days", "per day", "一天", "每天", "两天", "三天", "每周", "频率",
+    ])
+    step_hits = _keyword_hits(text, [
+        "masajea", "massage", "apply", "use it", "usa lo", "usalo", "rinse", "wash", "comb",
+        "涂抹", "按摩", "清洗", "冲洗", "梳理", "使用", "步骤", "顺序", "发根",
+    ])
+    ingredient_hits = _keyword_hits(text, [
+        "ingredients", "ingredientes", "minoxidil", "jengibre", "ginger", "keratin", "keratina",
+        "natural", "suaves", "成分", "米诺地尔", "生姜", "角蛋白", "温和",
+    ])
+    experience_hits = _keyword_hits(text, [
+        "relajado", "relaxed", "feels", "result", "after", "después", "smooth", "thick",
+        "舒服", "放松", "使用后", "效果", "变厚", "顺滑", "体验",
+    ])
+
+    routine_signal_count = sum([
+        bool(frequency_hits),
+        bool(step_hits),
+        bool(ingredient_hits),
+        bool(experience_hits),
+    ])
+
+    return grwm_or_care_hits and product_hits and routine_signal_count >= 2
+
+
+def normalize_grwm_ritual_care_routine(items):
+    reason = "视频虽有开头情绪钩子，但主体围绕护肤/护发/洗护产品的使用频率、操作步骤、成分功效和使用后体验展开，属于把产品嵌入个人护理流程的仪式步骤型。"
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("viral_formula") == "GRWM + 产品":
+            item["formula_subtype"] = "仪式步骤型"
+            item["category_reason"] = reason
+    return items
+
+
 def normalize_formula_classification(items):
     if should_classify_as_unboxing_review(items):
         return normalize_as_unboxing_review(items)
 
+    if should_reclassify_as_alternative_showdown(items):
+        reason = "核心表达是贵价/竞品/常规方案与更便宜或替代方案的对比，强调平替价值，因此判定为平替对决型。"
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item["viral_formula"] = "分屏对比"
+            item["formula_subtype"] = "平替对决型"
+            item["category_reason"] = reason
+        return items
+
     if should_classify_as_grwm_ritual_tryon(items):
         return normalize_grwm_ritual_tryon(items)
 
-    if not should_reclassify_as_alternative_showdown(items):
-        return items
+    if should_classify_as_grwm_ritual_care_routine(items):
+        return normalize_grwm_ritual_care_routine(items)
 
-    reason = "核心表达是贵价/竞品/常规方案与更便宜或替代方案的对比，强调平替价值，因此判定为平替对决型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "分屏对比"
-        item["formula_subtype"] = "平替对决型"
-        item["category_reason"] = reason
     return items
 
 
@@ -1790,6 +2095,49 @@ def analyze_video(transcript, model_type, video_path=None, visual_frames=None, p
             print("gptproto 分析错误:", e)
             raise RuntimeError(f"gptproto 分析失败: {e}")
 
+    elif model_type in {"claude-sonnet-4-5-20250929", "claude"}:
+        if not GPTPROTO_API_KEY:
+            raise RuntimeError("未配置 GPTPROTO_API_KEY")
+
+        target_model = GPTPROTO_CLAUDE_MODEL if model_type == "claude" else model_type
+        messages = build_gptproto_claude_messages(prompt, visual_frames)
+
+        try:
+            response = requests.post(
+                f"{BRAIN_BASE_URL.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": GPTPROTO_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": target_model,
+                    "messages": messages,
+                    "max_tokens": 8000,
+                    "stream": False,
+                },
+                timeout=180,
+            )
+            if response.status_code == 401:
+                raise RuntimeError("GPTPROTO_API_KEY 无效，请检查配置")
+            if response.status_code == 429:
+                raise RuntimeError("gptproto 额度不足或请求受限，请检查配额")
+            response.raise_for_status()
+
+            data = response.json()
+            return normalize_json_text(data["choices"][0]["message"]["content"])
+        except requests.HTTPError as e:
+            detail = ""
+            try:
+                detail = response.text
+            except Exception:
+                detail = str(e)
+            raise RuntimeError(f"gptproto Claude 请求失败: {detail}")
+        except requests.RequestException as e:
+            raise RuntimeError(f"gptproto Claude 网络请求失败: {e}")
+        except Exception as e:
+            print("gptproto Claude 分析错误:", e)
+            raise RuntimeError(f"gptproto Claude 分析失败: {e}")
+
     elif model_type in {"tongyi", "qwen-turbo"}:
         if not DASHSCOPE_KEY:
             raise RuntimeError("未配置 DASHSCOPE_KEY")
@@ -1835,11 +2183,15 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     extract_frames(video_path)
     check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "开始提取音频", filename=filename)
+    audio_extract_start = time.perf_counter()
     has_audio = extract_audio(video_path)
+    audio_extract_seconds = time.perf_counter() - audio_extract_start
     check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "音频提取完成", has_audio=has_audio)
     log_analysis_job(job_id, "开始 ASR 转写" if has_audio else "视频无音频，跳过 ASR")
+    asr_start = time.perf_counter()
     transcript = audio_to_text() if has_audio else "未识别到音频"
+    asr_seconds = time.perf_counter() - asr_start
     log_analysis_job(job_id, "ASR 转写完成", transcript_chars=len(transcript or ""))
     log_analysis_job(job_id, "开始采样视觉关键帧")
     visual_frames = sample_visual_frames(video_path) if video_path else []
@@ -1849,6 +2201,13 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     check_analysis_cancelled(job_id)
     log_analysis_job(job_id, "最终 Prompt 构建完成", prompt_chars=len(prompt or ""))
     preprocess_seconds = time.perf_counter() - preprocess_start
+    log_analysis_job(
+        job_id,
+        "音频和字幕耗时统计",
+        video_to_audio=format_duration(audio_extract_seconds),
+        subtitle_analysis=format_duration(asr_seconds),
+        has_audio=has_audio,
+    )
     print_final_prompt_for_debug(filename, model, prompt, transcript, visual_frames)
 
     ai_start = time.perf_counter()
@@ -1861,6 +2220,8 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     postprocess_start = time.perf_counter()
     log_analysis_job(job_id, "开始后处理结果")
     result = enrich_storyboard_result(result, video_path)
+    if not parse_result_items(result):
+        raise RuntimeError("AI 未生成有效分镜，请重新拆解或更换模型")
     check_analysis_cancelled(job_id)
     if replace_analysis_id:
         stored = update_analysis_record_result(replace_analysis_id, model, result)
@@ -1871,6 +2232,8 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
     log_analysis_job(job_id, "后处理和保存完成", elapsed=format_duration(postprocess_seconds))
 
     timing = {
+        "audio_extract_seconds": audio_extract_seconds,
+        "asr_seconds": asr_seconds,
         "preprocess_seconds": preprocess_seconds,
         "ai_seconds": ai_seconds,
         "postprocess_seconds": postprocess_seconds,
@@ -1938,6 +2301,8 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
             shutil.rmtree(Path(video_path).parent, ignore_errors=True)
         except Exception:
             pass
+        # 清理内存中的取消事件
+        job_cancel_events.pop(job_id, None)
         log_analysis_job(job_id, "后台任务清理完成")
 
 
@@ -2029,6 +2394,19 @@ async def analysis_job_detail(job_id: str):
 @app.get("/api/analysis-jobs/{job_id}")
 async def analysis_job_detail_with_api_prefix(job_id: str):
     return await analysis_job_detail(job_id)
+
+
+@app.get("/analysis-jobs/by-analysis/{analysis_id}")
+async def analysis_job_by_analysis(analysis_id: str):
+    job = get_analysis_job_by_analysis_id(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+    return {"code": 0, "data": job}
+
+
+@app.get("/api/analysis-jobs/by-analysis/{analysis_id}")
+async def analysis_job_by_analysis_with_api_prefix(analysis_id: str):
+    return await analysis_job_by_analysis(analysis_id)
 
 
 @app.post("/analysis-jobs/{job_id}/cancel")
@@ -2134,4 +2512,4 @@ async def delete_analysis_with_api_prefix(analysis_id: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8001"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=True)

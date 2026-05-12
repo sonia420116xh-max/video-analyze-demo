@@ -13,6 +13,18 @@
 
 ## 2. 使用流程
 
+用户上传视频
+    ↓
+FastAPI 接收 → 创建 job → 写入 SQLite (status=queued)
+    ↓
+后台线程开始分析 → 更新 SQLite (status=processing)
+    ↓
+AI 分析完成 → 结果写入 SQLite analyses 表 + 视频/帧存文件
+    ↓
+更新 SQLite job (status=completed)
+    ↓
+前端轮询 /analysis-jobs/{job_id} → 读 SQLite 返回状态
+
 用户在前端页面上传视频后，系统会进入后台分析任务。
 
 完整流程如下：

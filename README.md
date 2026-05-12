@@ -2,6 +2,8 @@
 
 基于 Python + FastAPI 实现，支持本地 Whisper/OpenAI 转写，以及 gemini-2.5-pro、gpt-4o、qwen-turbo 等具体模型做分镜拆解。
 
+项目目录和运行时文件说明见：[`docs/project-structure.md`](docs/project-structure.md)。
+
 ## 一、安装依赖
 
 ```bash
@@ -52,7 +54,7 @@ export WHISPER_MODEL=base
 ## 三、启动后端
 
 ```bash
-PORT=8001 python3 main.py
+PORT=8001 python3 -m backend.main
 ```
 
 ## 四、前端代理
