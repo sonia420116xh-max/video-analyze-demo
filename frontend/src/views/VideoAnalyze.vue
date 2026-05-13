@@ -21,9 +21,19 @@
 
       <div class="copy-page-grid">
         <aside class="copy-source-panel">
-          <div>
-            <p class="eyebrow">源视频结构</p>
-            <h3>{{ getVersionFormulaName(scriptCopySourceVersion) }}</h3>
+          <div class="copy-source-head">
+            <div>
+              <p class="eyebrow">源视频结构</p>
+              <h3>{{ getVersionFormulaName(scriptCopySourceVersion) }}</h3>
+            </div>
+            <el-button
+              size="small"
+              plain
+              :disabled="exportingScriptXlsx || !(scriptCopySourceVersion?.data || []).length"
+              @click="exportSourceScriptXlsx"
+            >
+              导出脚本
+            </el-button>
           </div>
           <div class="copy-source-tags">
             <el-tag size="small" type="success">{{ getVersionFormulaSubtype(scriptCopySourceVersion) }}</el-tag>
@@ -85,7 +95,10 @@
             </el-form-item>
 
             <el-form-item label="希望突出的内容">
-              <div class="highlight-input-wrap">
+              <div
+                class="highlight-input-wrap"
+                :class="{ 'is-generating': sellingPointsGenerating }"
+              >
                 <el-input
                   v-model="scriptCopyForm.selling_points"
                   type="textarea"
@@ -96,15 +109,37 @@
                   :placeholder="sellingPointsGenerating ? '正在根据商品信息生成卖点...' : '例如：香水, 女士, 75ml。也可以写想强调的质感、功效、价格、适用人群。'"
                   @input="handleSellingPointsInput"
                 />
-                <div class="data-support-tip">
-                  {{ sellingPointsGenerating ? 'AI 正在根据商品信息生成卖点' : '卖点由 AI 根据商品信息生成，用户可继续修改' }}
+                <div
+                  v-if="sellingPointsGenerating"
+                  class="selling-points-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span class="selling-points-spinner" aria-hidden="true" />
+                  <div>
+                    <strong>AI 正在生成商品卖点</strong>
+                    <p>会结合商品标题、品类和已上传图片，生成后自动填入，可继续编辑。</p>
+                  </div>
+                </div>
+                <div v-else class="data-support-tip">
+                  卖点由 AI 根据商品信息生成，用户可继续修改
                 </div>
               </div>
             </el-form-item>
 
-            <div class="selling-point-recommendations">
+            <div
+              class="selling-point-recommendations"
+              :class="{ 'is-generating': sellingPointsGenerating }"
+            >
               <strong>卖点推荐</strong>
-              <div>
+              <div v-if="sellingPointsGenerating" class="recommend-skeleton-list" aria-hidden="true">
+                <span
+                  v-for="item in 6"
+                  :key="`selling-point-skeleton-${item}`"
+                  class="recommend-skeleton"
+                />
+              </div>
+              <div v-else>
                 <el-tag
                   v-for="tag in sellingPointRecommendationTags"
                   :key="tag"
@@ -206,6 +241,16 @@
                 @click="copyGeneratedScript"
               >
                 复制结果
+              </el-button>
+              <el-button
+                v-if="scriptCopyResult"
+                size="small"
+                type="primary"
+                plain
+                :loading="exportingScriptXlsx"
+                @click="exportGeneratedScriptXlsx"
+              >
+                导出脚本
               </el-button>
             </div>
 
@@ -719,6 +764,7 @@ const scriptCopyImageFiles = ref([])
 const scriptCopyImagePreviewUrls = ref({})
 const scriptCopySellingPointsTouched = ref(false)
 const sellingPointsGenerating = ref(false)
+const exportingScriptXlsx = ref(false)
 const sellingPointsRequestSeq = ref(0)
 const lastSellingPointsProductTitle = ref('')
 const sellingPointRecommendationTags = [
@@ -1310,6 +1356,188 @@ const estimateSourceDurationSeconds = (version) => {
   const lastEnd = Math.max(0, ...items.map((item) => toSeconds(item.end_time)))
   return lastEnd ? String(Math.round(lastEnd)) : ''
 }
+
+const sanitizeFileName = (name) => String(name || 'script')
+  .replace(/[\\/:*?"<>|]+/g, '-')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, 80) || 'script'
+
+const formatExportTimeRange = (start, end) => `${formatTime(start)}~${formatTime(end)}`
+
+const getShotScriptText = (item) => (
+  item.script
+  || item.subtitle
+  || item.transcript
+  || item.voiceover
+  || formatShotScript(item)
+  || ''
+)
+
+const getShotScriptTranslation = (item) => (
+  item.script_translation
+  || item.translation
+  || item.subtitle_translation
+  || item.script_cn
+  || ''
+)
+
+const buildSourceScriptExportRows = () => (scriptCopySourceVersion.value?.data || []).map((item, index) => ({
+  sequence: index + 1,
+  structure: item.title || item.content_tag || item.narrative_role || `分镜 ${index + 1}`,
+  timeRange: formatExportTimeRange(item.start_time, item.end_time),
+  imageUrl: item.image_url ? getImageUrl(item.image_url) : '',
+  scriptText: getShotScriptText(item),
+  scriptTranslation: getShotScriptTranslation(item),
+  description: item.scene_description || item.conversion_point || '',
+}))
+
+const buildGeneratedScriptExportRows = () => (scriptCopyResult.value?.shots || []).map((shot, index) => ({
+  sequence: shot.shot_index || index + 1,
+  structure: shot.title || `分镜 ${index + 1}`,
+  timeRange: shot.duration_seconds ? `${shot.duration_seconds}s` : '',
+  imageUrl: '',
+  scriptText: shot.new_script || [shot.visual_plan, shot.voiceover, shot.screen_text].filter(Boolean).join('\n'),
+  scriptTranslation: shot.voiceover || '',
+  description: [
+    shot.visual_plan ? `画面：${shot.visual_plan}` : '',
+    shot.screen_text ? `字幕：${shot.screen_text}` : '',
+    shot.shooting_notes ? `拍摄要点：${shot.shooting_notes}` : '',
+    shot.conversion_point ? `转化作用：${shot.conversion_point}` : '',
+    shot.hook_implementation ? `黄金3秒：${shot.hook_implementation}` : '',
+  ].filter(Boolean).join('\n'),
+}))
+
+const getImageExtension = (contentType, url = '') => {
+  if (contentType.includes('png') || /\.png($|\?)/i.test(url)) return 'png'
+  if (contentType.includes('gif') || /\.gif($|\?)/i.test(url)) return 'gif'
+  return 'jpeg'
+}
+
+const fetchImageForWorkbook = async (url) => {
+  if (!url) return null
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const blob = await res.blob()
+    return {
+      buffer: await blob.arrayBuffer(),
+      extension: getImageExtension(blob.type || '', url),
+    }
+  } catch (err) {
+    console.warn('fetch export image failed:', err)
+    return null
+  }
+}
+
+const exportScriptRowsToXlsx = async ({ rows, fileName, title }) => {
+  if (!rows.length) {
+    ElMessage.warning('暂无可导出的脚本')
+    return
+  }
+  exportingScriptXlsx.value = true
+  try {
+    const ExcelJS = await import('exceljs')
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Sheet1', {
+      views: [{ state: 'frozen', ySplit: 2 }],
+      properties: { defaultRowHeight: 22 },
+    })
+    sheet.mergeCells('A1:G1')
+    sheet.getCell('A1').value = title || '脚本导出'
+    sheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' }
+    sheet.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FF8000A8' } }
+    sheet.getRow(1).height = 34
+
+    sheet.getRow(2).values = ['分镜序号', '脚本结构', '分镜时间轴', '分镜首帧', '脚本文案', '脚本文案翻译', '分镜描述']
+    sheet.getRow(2).height = 28
+    sheet.getRow(2).eachCell((cell) => {
+      cell.font = { bold: true, size: 12, color: { argb: 'FF000000' } }
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } }
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      }
+    })
+
+    sheet.columns = [
+      { key: 'sequence', width: 10 },
+      { key: 'structure', width: 18 },
+      { key: 'timeRange', width: 18 },
+      { key: 'image', width: 18 },
+      { key: 'scriptText', width: 42 },
+      { key: 'scriptTranslation', width: 42 },
+      { key: 'description', width: 48 },
+    ]
+
+    for (const [index, row] of rows.entries()) {
+      const excelRow = sheet.getRow(index + 3)
+      excelRow.values = [
+        row.sequence,
+        row.structure,
+        row.timeRange,
+        '',
+        row.scriptText,
+        row.scriptTranslation,
+        row.description,
+      ]
+      excelRow.height = row.imageUrl ? 92 : 72
+      excelRow.eachCell((cell) => {
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        }
+      })
+      ;[5, 6, 7].forEach((col) => {
+        excelRow.getCell(col).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+      })
+      const image = await fetchImageForWorkbook(row.imageUrl)
+      if (image) {
+        const imageId = workbook.addImage({ buffer: image.buffer, extension: image.extension })
+        sheet.addImage(imageId, {
+          tl: { col: 3.28, row: index + 2.18 },
+          ext: { width: 88, height: 88 },
+          editAs: 'oneCell',
+        })
+      }
+    }
+
+    const buffer = await workbook.xlsx.writeBuffer()
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${sanitizeFileName(fileName)}.xlsx`
+    link.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('脚本已导出')
+  } catch (err) {
+    console.error('export script xlsx failed:', err)
+    ElMessage.error('导出脚本失败')
+  } finally {
+    exportingScriptXlsx.value = false
+  }
+}
+
+const exportSourceScriptXlsx = () => exportScriptRowsToXlsx({
+  rows: buildSourceScriptExportRows(),
+  title: '原视频脚本导出',
+  fileName: `${currentFileName.value || 'source-video'}-原视频脚本`,
+})
+
+const exportGeneratedScriptXlsx = () => exportScriptRowsToXlsx({
+  rows: buildGeneratedScriptExportRows(),
+  title: '新脚本导出',
+  fileName: `${scriptCopyForm.value.product_name || currentFileName.value || 'generated'}-新脚本`,
+})
 
 const getUploadFileKey = (file) => String(file?.uid || file?.name || file?.raw?.name || '')
 
@@ -2262,6 +2490,14 @@ onBeforeUnmount(() => {
   line-height: 1.35;
 }
 
+.copy-source-head,
+.copy-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
 .copy-source-tags {
   display: flex;
   gap: 8px;
@@ -2371,6 +2607,16 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.highlight-input-wrap :deep(.el-textarea__inner) {
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.highlight-input-wrap.is-generating :deep(.el-textarea__inner) {
+  background: #f8fbff;
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(43, 125, 233, 0.14);
+}
+
 .data-support-tip {
   width: fit-content;
   max-width: 100%;
@@ -2380,6 +2626,41 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.selling-points-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  color: #174a7c;
+  background: #eef6ff;
+  border: 1px solid #b9d7f8;
+  border-radius: 8px;
+}
+
+.selling-points-status strong {
+  display: block;
+  color: #174a7c;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.selling-points-status p {
+  margin: 2px 0 0;
+  color: #52657a;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.selling-points-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #b9d7f8;
+  border-top-color: #2b7de9;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
 }
 
 .selling-point-recommendations {
@@ -2397,6 +2678,35 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.selling-point-recommendations.is-generating .recommend-tag {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.recommend-skeleton-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.recommend-skeleton {
+  width: 74px;
+  height: 24px;
+  overflow: hidden;
+  position: relative;
+  background: #eef2f7;
+  border-radius: 999px;
+}
+
+.recommend-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.78), transparent);
+  animation: shimmer 1.2s infinite;
 }
 
 .recommend-tag {
@@ -2897,6 +3207,12 @@ onBeforeUnmount(() => {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
   }
 }
 
