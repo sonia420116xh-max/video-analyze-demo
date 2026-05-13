@@ -66,6 +66,46 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertEqual(post.call_args.args[0], "https://gptproto.com/v1/chat/completions")
         self.assertEqual(payload["model"], "gemini-2.5-pro")
 
+    def test_gemini_retries_transient_gptproto_ssl_error(self):
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": '[{"title":"故事开场"}]'}}]
+        }
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main.time, "sleep") as sleep_mock, \
+             patch(
+                 "backend.main.requests.post",
+                 side_effect=[main.requests.exceptions.SSLError("EOF occurred in violation of protocol"), response],
+             ) as post:
+            result = main.analyze_video("TRANSCRIPT", "gemini-2.5-pro", "/tmp/demo.mp4")
+
+        self.assertEqual(result, '[{"title":"故事开场"}]')
+        self.assertEqual(post.call_count, 2)
+        sleep_mock.assert_called_once()
+
+    def test_gemini_reports_retry_exhausted_for_gptproto_ssl_error(self):
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main.time, "sleep") as sleep_mock, \
+             patch(
+                 "backend.main.requests.post",
+                 side_effect=main.requests.exceptions.SSLError("EOF occurred in violation of protocol"),
+             ) as post:
+            with self.assertRaises(RuntimeError) as context:
+                main.analyze_video("TRANSCRIPT", "gemini-2.5-pro", "/tmp/demo.mp4")
+
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+        message = str(context.exception)
+        self.assertIn("外部接口网络/TLS 连接连续重试后仍失败", message)
+        self.assertIn("请稍后重试或切换模型", message)
+
     def test_claude_uses_gptproto_chat_completions_with_file_images(self):
         visual_frames = [
             {
@@ -1114,6 +1154,47 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["selling_point_subtype"] == "免决策" for item in enriched))
         self.assertIn("没有拆包", enriched[0]["category_reason"])
 
+    def test_enrich_does_not_treat_apparel_haul_item_handling_as_unboxing(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 48,
+                "title": "产品卖点",
+                "scene_description": "创作者已经穿着浅蓝色拼接连衣裙在镜头前试穿，并拿出凉鞋近距离展示重量、颜色和夏季搭配感。",
+                "script": "Okay, this is cute. I got it in two colors. This is the Perry Winkle. It's really good quality material. Not with these shoes, but these shoes are my shoes of summer.",
+                "product_category": "服装/鞋",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 48,
+                "end_time": 75,
+                "title": "情绪营销",
+                "scene_description": "创作者抱着一大堆印花 T 恤快速展示，说明 Christian T-shirts 是 conversation starters。",
+                "script": "Christian T-shirts for me are a lot of conversation starters. Christian T-shirt, rapid fire, TikTok shop haul.",
+                "product_category": "服装",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 113,
+                "end_time": 151,
+                "title": "真实体验",
+                "scene_description": "创作者换上针织上衣和裤子组合，并拿出两副 oversized aviators 讲重量和给家人的分配。",
+                "script": "I love spring sweater and the pants. This is not a set. They're like a barrel, casual. But oversized aviators, I love, very, very lightweight.",
+                "product_category": "服装/配饰",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/grwm-haul.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "GRWM + 产品" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "教学穿插型" for item in enriched))
+        self.assertIn("没有拆包", enriched[0]["category_reason"])
+
     def test_enrich_corrects_apparel_haul_story_step_overlabels(self):
         model_result = json.dumps([
             {
@@ -1640,6 +1721,247 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["selling_point_subtype"] == "直接比价" for item in enriched))
         self.assertTrue(all(item["golden_3s_hook"] == "" for item in enriched))
         self.assertTrue(all(item["golden_3s_subtype"] == "" for item in enriched))
+
+    def test_build_script_copy_prompt_includes_story_logic_and_golden_3s_recreation(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "开箱 / ASMR",
+            "subtype": "开箱评测型",
+            "category_reason": "通过拆包装、触摸材质和上身评价建立质感信任。",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 3,
+                    "title": "故事开场",
+                    "scene_description": "创作者先拿起包裹并快速撕开外包装，用拆封动作制造期待。",
+                    "script": "I found the softest hoodie on sale.",
+                    "content_tag": "情绪营销",
+                    "visual_tactic": "开箱特写",
+                    "conversion_point": "用开箱期待让观众继续看产品质感。",
+                    "selling_point_angle": "价格优势",
+                    "selling_point_subtype": "普通折扣价",
+                    "selling_point_reason": "用 sale 强化划算感。",
+                    "golden_3s_hook": "秘诀/技巧",
+                    "golden_3s_subtype": "省钱秘笈",
+                    "golden_3s_reason": "开头直接抛出低价发现，制造省钱信息差。",
+                },
+                {
+                    "start_time": 3,
+                    "end_time": 10,
+                    "title": "产品卖点",
+                    "scene_description": "创作者摸面料并展示帽衫上身效果，强调柔软和版型。",
+                    "script": "It is thick, soft, and fits oversized.",
+                    "content_tag": "产品卖点",
+                    "visual_tactic": "材质触摸和镜前展示",
+                    "conversion_point": "把低价和质感绑定，降低购买顾虑。",
+                },
+            ],
+        }
+
+        prompt = main.build_script_copy_prompt(
+            source_record,
+            main.normalize_script_copy_product_input({
+                "product_name": "便携筋膜枪",
+                "product_category": "运动恢复工具",
+                "target_audience": "久坐上班族",
+                "selling_points": "小巧、低噪、三档力度",
+                "usage_scene": "办公室午休和健身后放松",
+                "price_offer": "限时 20% off",
+                "brand_tone": "真实测评、少夸张",
+                "duration_seconds": "18",
+            }),
+        )
+
+        self.assertIn("开箱 / ASMR / 开箱评测型", prompt)
+        self.assertIn("黄金3秒复刻", prompt)
+        self.assertIn("省钱秘笈", prompt)
+        self.assertIn("先用“低价发现/隐藏福利/划算路径”", prompt)
+        self.assertIn("便携筋膜枪", prompt)
+        self.assertIn("久坐上班族", prompt)
+        self.assertIn("分镜 1", prompt)
+        self.assertIn("只复制结构、节奏、钩子和转化逻辑", prompt)
+
+    def test_generate_script_copy_normalizes_model_json_object(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "产品对比型",
+            "category_reason": "通过左右对比建立选择理由。",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "title": "产品对比",
+                    "scene_description": "左右分屏展示两种产品。",
+                    "script": "Which one is better?",
+                    "content_tag": "产品对比",
+                    "golden_3s_hook": "提问式",
+                    "golden_3s_subtype": "比价追问",
+                    "golden_3s_reason": "开头用选择问题制造悬念。",
+                }
+            ],
+        }
+        model_response = json.dumps({
+            "copy_strategy": {"script_logic": "用对比问题开场，再逐段证明选择理由。"},
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "duration_seconds": 4,
+                    "title": "产品对比",
+                    "new_script": "Which desk lamp is better for late-night work?",
+                }
+            ],
+        }, ensure_ascii=False)
+
+        with patch.object(main, "analyze_video", return_value=model_response) as analyze:
+            result = main.generate_script_copy(
+                source_record,
+                {"product_name": "护眼台灯", "selling_points": "柔光、防眩、三档亮度"},
+                "gemini-2.5-pro",
+            )
+
+        self.assertEqual(result["model"], "gemini-2.5-pro")
+        self.assertEqual(result["source_analysis_id"], "analysis-1")
+        self.assertEqual(result["source_formula"], "分屏对比")
+        self.assertEqual(result["source_subtype"], "产品对比型")
+        self.assertEqual(result["copy_strategy"]["script_logic"], "用对比问题开场，再逐段证明选择理由。")
+        self.assertEqual(result["shots"][0]["new_script"], "Which desk lamp is better for late-night work?")
+        prompt = analyze.call_args.kwargs["prompt"]
+        self.assertIn("护眼台灯", prompt)
+        self.assertIn("比价追问", prompt)
+
+    def test_generate_script_copy_falls_back_to_shots_when_model_omits_them(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "category_reason": "通过价格和效果对比建立选择理由。",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 12,
+                    "title": "用户痛点",
+                    "scene_description": "先问真实花费，制造成本疑问。",
+                    "script": "How much do you pay for this?",
+                    "content_tag": "痛点开场",
+                    "visual_tactic": "价格字幕和产品近景",
+                    "conversion_point": "让观众继续看平替方案。",
+                    "golden_3s_hook": "提问式",
+                    "golden_3s_subtype": "成本提问",
+                    "golden_3s_reason": "开头用花费问题制造参与感。",
+                },
+                {
+                    "start_time": 12,
+                    "end_time": 27,
+                    "title": "产品功效",
+                    "scene_description": "展示使用前后对比。",
+                    "conversion_point": "证明产品有效。",
+                },
+            ],
+        }
+        model_response = json.dumps({
+            "copy_strategy": {
+                "script_logic": "先问成本，再展示产品价值。",
+                "golden_3s_recreation": "用成本问题开场。",
+            },
+        }, ensure_ascii=False)
+
+        with patch.object(main, "analyze_video", return_value=model_response):
+            result = main.generate_script_copy(
+                source_record,
+                {
+                    "product_name": "Temporary Teeth Cover",
+                    "selling_points": "临时牙套、可调节大小、自然微笑",
+                    "usage_scene": "临时修饰牙齿",
+                },
+                "gemini-2.5-pro",
+            )
+
+        self.assertEqual(len(result["shots"]), 2)
+        self.assertEqual(result["shots"][0]["title"], "用户痛点")
+        self.assertIn("Temporary Teeth Cover", result["shots"][0]["visual_plan"])
+        self.assertIn("临时牙套", result["shots"][0]["screen_text"])
+        self.assertIn("源视频黄金3秒命中", result["shots"][0]["hook_implementation"])
+        self.assertIn("模型未返回可拍摄分镜", result["copy_strategy"]["fallback_reason"])
+
+    def test_generate_script_copy_logs_generation_steps(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "title": "痛点开场",
+                    "scene_description": "提出价格问题。",
+                }
+            ],
+        }
+        model_response = json.dumps({
+            "copy_strategy": {"script_logic": "先问痛点，再给方案。"},
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "duration_seconds": 4,
+                    "title": "痛点开场",
+                    "visual_plan": "展示产品。",
+                    "new_script": "先问观众是否遇到同样问题。",
+                }
+            ],
+        }, ensure_ascii=False)
+
+        with patch.object(main, "analyze_video", return_value=model_response), \
+             patch.object(main, "log_script_copy_job") as log_job:
+            result = main.generate_script_copy(
+                source_record,
+                {"product_name": "Temporary Teeth Cover", "selling_points": "自然微笑"},
+                "gemini-2.5-pro",
+                log_context="analysis-1",
+            )
+
+        self.assertEqual(len(result["shots"]), 1)
+        messages = [call.args[1] for call in log_job.call_args_list]
+        self.assertIn("Prompt 构建完成", messages)
+        self.assertIn("开始调用 AI 生成新脚本", messages)
+        self.assertIn("AI 返回新脚本", messages)
+        self.assertIn("结果归一化完成", messages)
+
+    def test_generate_product_selling_points_uses_ai_and_normalizes_list(self):
+        model_response = json.dumps({
+            "product_classification": "女装与女士内衣",
+            "selling_points": [
+                "女士上衣",
+                "大码",
+                "社交场合",
+                "粘胶纤维",
+                "46到54",
+            ],
+        }, ensure_ascii=False)
+
+        with patch.object(main, "analyze_video", return_value=model_response) as analyze:
+            result = main.generate_product_selling_points(
+                {
+                    "product_name": "Blusa Camisa Feminina Plus Size ticidSocial Viscolinho Formas Grandes 46 Ao 54",
+                    "product_category": "",
+                    "current_selling_points": "",
+                },
+                "gemini-2.5-pro",
+            )
+
+        self.assertEqual(result["product_classification"], "女装与女士内衣")
+        self.assertEqual(result["selling_points"], ["女士上衣", "大码", "社交场合", "粘胶纤维", "46到54"])
+        prompt = analyze.call_args.kwargs["prompt"]
+        self.assertIn("不要把完整商品标题原样作为卖点", prompt)
+        self.assertIn("Blusa Camisa Feminina Plus Size", prompt)
 
 
 if __name__ == "__main__":

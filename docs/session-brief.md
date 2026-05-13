@@ -4,13 +4,18 @@
 
 ## 当前重点
 
-- 最近处理：多模型视频拆解工作流增强。
+- 最近处理：视频详情页“一键复制”脚本复刻功能。
 - 当前实现：
-  - `claude-sonnet-4-5-20250929` 已作为 gptproto 模型接入，走 `/v1/chat/completions` 的 openai-format File Analysis，关键帧用 `file.file_data` 传 data URL。
-  - `gpt-4o` 仍走 gptproto `/v1/responses`，`gemini-2.5-pro` 仍走 `/v1/chat/completions`。
-  - `run_analysis_pipeline` 在“开始调用 AI 分析”前打印视频转音频和字幕/ASR 耗时，并把 `audio_extract_seconds`、`asr_seconds` 写入 job timing。
-  - 多模型结果卡片中，正在重新拆解的模型会显示“停止生成”按钮；点击后二次确认并调用后端取消接口。取消重拆任务会保留原分析结果并恢复记录状态为已完成。
-- 之前已实现：`/api/analyses` 合并已完成 `analyses` 记录，以及 `analysis_jobs` 中仍处于 `queued`/`processing` 的初始上传任务占位记录；`failed`/`canceled` 且没有生成 `analysis_id` 的孤立 job 不再常驻显示为视频记录。
+  - 详情页模型结果卡片新增“一键复制”，进入独立脚本复刻页；源视频结构、分镜模板和黄金 3 秒复刻说明在左侧展示。
+  - 后端新增 `POST /api/analyses/{analysis_id}/script-copy`，读取历史拆解结果即时生成新商品脚本；不新增数据库表，不保存生成结果。
+  - 复刻 prompt 会套用源视频爆款公式、分镜节奏、卖点角度、视觉手法、转化逻辑和黄金 3 秒钩子，但禁止照抄源视频台词、品牌、商品、价格或具体承诺。
+  - 前端脚本复刻表单已简化为“需要带货的商品”和“希望突出的内容”；产品品类、目标用户、使用场景、优惠、时长、模型、语气等放入高级设置。
+  - 新增 `POST /api/product-selling-points`，用 AI 根据商品标题、品类、补充内容和可选图片生成默认卖点；前端失败时才用本地规则兜底，用户编辑后不再覆盖。
+  - 上传产品图片使用本地 object URL 预览，移除/离开页面时释放；图片只用于本次生成请求，不写入历史记录。
+  - 点击生成脚本前会比较用户商品推断类目和参考视频 `product_classification`；不一致时弹窗二次确认。
+  - 详情页黄金 3 秒 tag 可点击，气泡展示“怎么命中”和“怎么复刻”。
+  - gptproto 的 responses/chat/Claude 请求增加瞬时网络异常重试，避免一次 `SSLError/SSLEOFError` 直接导致分析任务失败。
+- 仍保留之前能力：多模型拆解、重新拆解、停止重拆、历史列表合并运行中任务、模型版本存储和产品分类筛选。
 
 ## 当前仓库状态
 
@@ -33,8 +38,9 @@
 
 ## 最近验证
 
-- `python3 -m unittest discover -s tests`：29 个测试通过。输出中仍有既有 MoviePy `/tmp/demo.mp4` 缺文件打印，但退出码为 0。
+- `python3 -m unittest discover -s tests`：64 个测试通过。输出中仍有既有 MoviePy `/tmp/demo.mp4` 缺文件打印，但退出码为 0。
 - `cd frontend && pnpm build`：构建通过，仍有 Vite/Rollup 的第三方注释和 chunk size 警告。
+- `git diff --check`：通过。
 
 ## 注意事项
 

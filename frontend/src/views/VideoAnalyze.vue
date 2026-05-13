@@ -1,6 +1,291 @@
 <template>
   <div class="analyze-page">
-    <section class="workspace">
+    <section v-if="scriptCopyPageOpen" class="copy-workspace">
+      <header class="copy-topbar">
+        <div>
+          <p class="eyebrow">一键复制脚本</p>
+          <h2>{{ scriptCopySourceTitle }}</h2>
+        </div>
+        <div class="copy-topbar-actions">
+          <el-button @click="backToAnalysisDetail">返回详情</el-button>
+          <el-button
+            type="primary"
+            :loading="scriptCopyLoading"
+            :disabled="!canSubmitScriptCopy"
+            @click="generateScriptCopy"
+          >
+            生成新脚本
+          </el-button>
+        </div>
+      </header>
+
+      <div class="copy-page-grid">
+        <aside class="copy-source-panel">
+          <div>
+            <p class="eyebrow">源视频结构</p>
+            <h3>{{ getVersionFormulaName(scriptCopySourceVersion) }}</h3>
+          </div>
+          <div class="copy-source-tags">
+            <el-tag size="small" type="success">{{ getVersionFormulaSubtype(scriptCopySourceVersion) }}</el-tag>
+            <el-tag v-if="getVersionSellingPoint(scriptCopySourceVersion)" size="small" type="warning" effect="plain">
+              {{ getVersionSellingPoint(scriptCopySourceVersion) }}
+            </el-tag>
+            <el-tag v-if="getVersionGolden3s(scriptCopySourceVersion)" size="small" type="danger" effect="plain">
+              黄金3秒 {{ getVersionGolden3s(scriptCopySourceVersion) }}
+            </el-tag>
+          </div>
+          <p class="category-reason" v-if="getVersionCategoryReason(scriptCopySourceVersion)">
+            {{ getVersionCategoryReason(scriptCopySourceVersion) }}
+          </p>
+          <div class="copy-hook-box">
+            <strong>黄金3秒复刻</strong>
+            <p>{{ getGolden3sRecreationText(scriptCopySourceVersion) }}</p>
+          </div>
+          <div class="copy-template-list">
+            <article
+              v-for="(item, idx) in scriptCopySourceVersion?.data || []"
+              :key="`copy-template-${idx}-${item.start_time}`"
+              class="copy-template-item"
+            >
+              <span>{{ formatTime(item.start_time) }} - {{ formatTime(item.end_time) }}</span>
+              <strong>{{ item.title || item.content_tag || `分镜 ${idx + 1}` }}</strong>
+              <p>{{ item.conversion_point || item.scene_description }}</p>
+            </article>
+          </div>
+        </aside>
+
+        <main class="copy-main-panel">
+          <section class="copy-form-panel">
+            <div class="copy-form-head">
+              <div>
+                <p class="eyebrow">用户产品</p>
+                <h3>填写新脚本要带货的商品</h3>
+              </div>
+            </div>
+
+            <el-form-item class="required-form-item" label="需要带货的商品">
+              <div class="product-picker">
+                <el-input
+                  v-model="scriptCopyForm.product_name"
+                  placeholder="输入商品名称，例如：Perfume Rebelle Feminino Hinode 75ml"
+                  @blur="handleProductTitleBlur"
+                />
+                <el-upload
+                  :auto-upload="false"
+                  :on-change="handleScriptCopyImageChange"
+                  :on-remove="handleScriptCopyImageRemove"
+                  :file-list="scriptCopyImageList"
+                  accept="image/*"
+                  multiple
+                  :show-file-list="false"
+                >
+                  <el-button plain>上传图片</el-button>
+                </el-upload>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="希望突出的内容">
+              <div class="highlight-input-wrap">
+                <el-input
+                  v-model="scriptCopyForm.selling_points"
+                  type="textarea"
+                  :maxlength="200"
+                  :rows="6"
+                  resize="vertical"
+                  show-word-limit
+                  :placeholder="sellingPointsGenerating ? '正在根据商品信息生成卖点...' : '例如：香水, 女士, 75ml。也可以写想强调的质感、功效、价格、适用人群。'"
+                  @input="handleSellingPointsInput"
+                />
+                <div class="data-support-tip">
+                  {{ sellingPointsGenerating ? 'AI 正在根据商品信息生成卖点' : '卖点由 AI 根据商品信息生成，用户可继续修改' }}
+                </div>
+              </div>
+            </el-form-item>
+
+            <div class="selling-point-recommendations">
+              <strong>卖点推荐</strong>
+              <div>
+                <el-tag
+                  v-for="tag in sellingPointRecommendationTags"
+                  :key="tag"
+                  class="recommend-tag"
+                  round
+                  effect="plain"
+                  @click="appendSellingPointTag(tag)"
+                >
+                  {{ tag }}
+                </el-tag>
+              </div>
+            </div>
+
+            <el-collapse class="advanced-copy-settings">
+              <el-collapse-item title="高级设置（可选）" name="advanced">
+                <div class="copy-form-grid">
+                  <el-form-item label="产品品类">
+                    <el-input
+                      v-model="scriptCopyForm.product_category"
+                      placeholder="例如：香水 / 运动恢复工具"
+                      @blur="generateDefaultSellingPoints"
+                    />
+                  </el-form-item>
+                  <el-form-item label="目标用户">
+                    <el-input v-model="scriptCopyForm.target_audience" placeholder="例如：女士、通勤人群、健身人群" />
+                  </el-form-item>
+                  <el-form-item label="使用场景">
+                    <el-input v-model="scriptCopyForm.usage_scene" placeholder="例如：约会、办公室、健身后放松" />
+                  </el-form-item>
+                  <el-form-item label="价格/优惠">
+                    <el-input v-model="scriptCopyForm.price_offer" placeholder="例如：限时 20% off、买一送一" />
+                  </el-form-item>
+                  <el-form-item label="目标时长">
+                    <el-input v-model="scriptCopyForm.duration_seconds" placeholder="例如：18 秒" />
+                  </el-form-item>
+                  <!-- <el-form-item label="生成模型">
+                    <el-select
+                      v-model="scriptCopyForm.model"
+                      class="copy-model-select"
+                      placeholder="生成模型"
+                      :disabled="modelOptions.length === 0"
+                    >
+                      <el-option
+                        v-for="option in modelOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </el-form-item> -->
+                </div>
+                <el-form-item label="表达语气">
+                  <el-input
+                    v-model="scriptCopyForm.brand_tone"
+                    placeholder="例如：真实测评、少夸张、偏口语、适合 TikTok Shop"
+                  />
+                </el-form-item>
+                <el-form-item label="补充要求">
+                  <el-input
+                    v-model="scriptCopyForm.extra_requirements"
+                    type="textarea"
+                    :rows="3"
+                    resize="vertical"
+                    placeholder="可选：禁用词、必须出现的卖点、平台、语言、拍摄限制等。"
+                  />
+                </el-form-item>
+              </el-collapse-item>
+            </el-collapse>
+
+            <div v-if="scriptCopyImageList.length" class="copy-upload-row">
+              <div>
+                <strong>已上传图片</strong>
+                <p>模型会只依据图片中能看见的信息补充画面，不会保存到历史记录。</p>
+              </div>
+              <el-upload
+                :auto-upload="false"
+                :on-change="handleScriptCopyImageChange"
+                :on-remove="handleScriptCopyImageRemove"
+                :file-list="scriptCopyImageList"
+                accept="image/*"
+                multiple
+                list-type="picture-card"
+              >
+                <span>继续上传</span>
+              </el-upload>
+            </div>
+          </section>
+
+          <section class="copy-result-panel">
+            <div class="copy-result-head">
+              <div>
+                <p class="eyebrow">生成结果</p>
+                <h3>新产品脚本</h3>
+              </div>
+              <el-button
+                v-if="scriptCopyResult"
+                size="small"
+                plain
+                @click="copyGeneratedScript"
+              >
+                复制结果
+              </el-button>
+            </div>
+
+            <div v-if="scriptCopyLoading" class="copy-loading">
+              <span class="empty-result-spinner" aria-hidden="true" />
+              <p>正在套用源视频脚本逻辑生成新脚本...</p>
+            </div>
+
+            <div v-else-if="scriptCopyResult" class="copy-result-content">
+              <div class="copy-strategy">
+                <strong>复刻策略</strong>
+                <p>{{ scriptCopyResult.copy_strategy?.script_logic || '已按源视频结构生成新脚本。' }}</p>
+                <p>{{ scriptCopyResult.copy_strategy?.golden_3s_recreation }}</p>
+              </div>
+
+              <div class="copy-section-title">
+                <strong>可拍摄分镜脚本</strong>
+                <span>按源视频段落结构生成，包含画面、口播、字幕和拍摄要点。</span>
+              </div>
+
+              <article
+                v-for="(shot, idx) in scriptCopyResult.shots || []"
+                :key="`copy-shot-${idx}`"
+                class="copy-shot-card"
+              >
+                <div class="copy-shot-head">
+                  <span>分镜 {{ shot.shot_index || idx + 1 }}</span>
+                  <strong>{{ shot.title || '脚本段落' }}</strong>
+                  <em>{{ shot.duration_seconds ? `${shot.duration_seconds}s` : '' }}</em>
+                </div>
+                <p v-if="shot.hook_implementation" class="copy-hook-line">
+                  {{ shot.hook_implementation }}
+                </p>
+                <dl>
+                  <div v-if="shot.visual_plan">
+                    <dt>画面</dt>
+                    <dd>{{ shot.visual_plan }}</dd>
+                  </div>
+                  <div v-if="shot.voiceover">
+                    <dt>口播</dt>
+                    <dd>{{ shot.voiceover }}</dd>
+                  </div>
+                  <div v-if="shot.screen_text">
+                    <dt>字幕</dt>
+                    <dd>{{ shot.screen_text }}</dd>
+                  </div>
+                  <div v-if="shot.new_script">
+                    <dt>完整脚本</dt>
+                    <dd>{{ shot.new_script }}</dd>
+                  </div>
+                  <div v-if="shot.shooting_notes">
+                    <dt>拍摄要点</dt>
+                    <dd>{{ shot.shooting_notes }}</dd>
+                  </div>
+                  <div v-if="shot.conversion_point">
+                    <dt>转化作用</dt>
+                    <dd>{{ shot.conversion_point }}</dd>
+                  </div>
+                </dl>
+              </article>
+
+              <div v-if="!(scriptCopyResult.shots || []).length" class="copy-empty-shots">
+                本次结果没有返回分镜，请重新生成或补充商品卖点后再试。
+              </div>
+
+              <div v-if="scriptCopyResult.cta_options?.length" class="copy-cta-box">
+                <strong>结尾 CTA 备选</strong>
+                <p>{{ scriptCopyResult.cta_options.join(' / ') }}</p>
+              </div>
+            </div>
+
+            <div v-else class="copy-empty-result">
+              填写产品信息后生成脚本。系统会复用源视频的爆款结构、分镜节奏、卖点角度和黄金3秒钩子实现方式。
+            </div>
+          </section>
+        </main>
+      </div>
+    </section>
+
+    <section v-else class="workspace">
       <header class="topbar">
         <div>
           <p class="eyebrow">短视频爆款模式拆解</p>
@@ -258,6 +543,15 @@
                             重新拆解
                           </el-button>
                           <el-button
+                            size="small"
+                            type="success"
+                            plain
+                            :disabled="!activeAnalysisId"
+                            @click="openScriptCopyPage(version)"
+                          >
+                            一键复制
+                          </el-button>
+                          <el-button
                             v-if="canStopReanalyzingModel(version.model)"
                             size="small"
                             type="danger"
@@ -275,9 +569,24 @@
                       <el-tag v-if="getVersionSellingPoint(version)" size="small" type="warning" effect="plain">
                         卖点角度 {{ getVersionSellingPoint(version) }}
                       </el-tag>
-                      <el-tag v-if="getVersionGolden3s(version)" size="small" type="danger" effect="plain">
-                        黄金3秒 {{ getVersionGolden3s(version) }}
-                      </el-tag>
+                      <el-popover
+                        v-if="getVersionGolden3s(version)"
+                        placement="bottom-start"
+                        trigger="click"
+                        width="360"
+                      >
+                        <template #reference>
+                          <el-tag class="clickable-tag" size="small" type="danger" effect="plain">
+                            黄金3秒 {{ getVersionGolden3s(version) }}
+                          </el-tag>
+                        </template>
+                        <div class="hook-popover">
+                          <strong>怎么命中</strong>
+                          <p>{{ getVersionGolden3sReason(version) }}</p>
+                          <strong>怎么复刻</strong>
+                          <p>{{ getGolden3sRecreationText(version) }}</p>
+                        </div>
+                      </el-popover>
                       <!-- <el-tag v-if="version.model" size="small" type="info" effect="plain">
                         {{ version.model }}
                       </el-tag> -->
@@ -401,6 +710,40 @@ const analysisStatusMap = ref({})
 const analysisVersion = ref(Date.now())
 const videoRef = ref(null)
 let currentFile = null
+const scriptCopyPageOpen = ref(false)
+const scriptCopyLoading = ref(false)
+const scriptCopyResult = ref(null)
+const scriptCopySourceModel = ref('')
+const scriptCopyImageList = ref([])
+const scriptCopyImageFiles = ref([])
+const scriptCopyImagePreviewUrls = ref({})
+const scriptCopySellingPointsTouched = ref(false)
+const sellingPointsGenerating = ref(false)
+const sellingPointsRequestSeq = ref(0)
+const lastSellingPointsProductTitle = ref('')
+const sellingPointRecommendationTags = [
+  '物流快',
+  '客服服务态度好',
+  '产品质量好',
+  '适用人群',
+  '价格划算',
+  '送礼合适',
+  '香味持久',
+  '包装精致',
+]
+const createEmptyScriptCopyForm = () => ({
+  model: '',
+  product_name: '',
+  product_category: '',
+  target_audience: '',
+  selling_points: '',
+  usage_scene: '',
+  price_offer: '',
+  brand_tone: '',
+  duration_seconds: '',
+  extra_requirements: '',
+})
+const scriptCopyForm = ref(createEmptyScriptCopyForm())
 
 const granularityOptions = [
   { label: '粗略', value: 'coarse' },
@@ -441,6 +784,69 @@ const PRODUCT_CLASSIFICATIONS = [
   '票务与代金券',
 ]
 
+const PRODUCT_CLASSIFICATION_RULES = [
+  {
+    classification: '美妆个护',
+    keywords: ['香水', 'perfume', 'fragrance', '口红', '精华', '面霜', '护肤', '美妆', '洗发', '护发', 'serum', 'cream', 'makeup'],
+    sellingPoints: ['香味有记忆点', '适合日常通勤', '送礼合适', '包装精致'],
+  },
+  {
+    classification: '手机与数码',
+    keywords: ['手机', '耳机', '充电', '数据线', '手机壳', 'phone', 'earbuds', 'charger', 'case'],
+    sellingPoints: ['使用方便', '兼容性好', '外观质感好', '日常高频使用'],
+  },
+  {
+    classification: '运动与户外',
+    keywords: ['健身', '瑜伽', '筋膜枪', '运动', '户外', '露营', 'fitness', 'massage gun', 'sport', 'outdoor'],
+    sellingPoints: ['便携好用', '适合运动后放松', '上手门槛低', '省时间'],
+  },
+  {
+    classification: '家居用品',
+    keywords: ['收纳', '清洁', '浴室', '家居', '拖把', 'storage', 'cleaning', 'bathroom', 'home'],
+    sellingPoints: ['解决日常痛点', '操作省力', '让空间更整洁', '适合家庭使用'],
+  },
+  {
+    classification: '厨房用品',
+    keywords: ['厨房', '锅', '餐具', '杯', 'kitchen', 'cookware', 'cup', 'bottle'],
+    sellingPoints: ['使用方便', '清洁省心', '适合日常做饭', '质感耐用'],
+  },
+  {
+    classification: '女装与女士内衣',
+    keywords: ['女装', '连衣裙', '裙', '内衣', 'dress', 'women', 'feminina', 'blusa', 'camisa', 'lingerie', 'skirt'],
+    sellingPoints: ['上身效果好', '版型显身材', '面料舒适', '适合多场景穿搭'],
+  },
+  {
+    classification: '男装与男士内衣',
+    keywords: ['男装', '男士', '衬衫', '裤', 'menswear', 'shirt', 'pants'],
+    sellingPoints: ['版型利落', '日常百搭', '面料舒适', '适合通勤'],
+  },
+  {
+    classification: '鞋靴',
+    keywords: ['鞋', '靴', '运动鞋', '凉鞋', 'shoe', 'sneaker', 'boots', 'sandals'],
+    sellingPoints: ['脚感舒适', '好搭配', '适合长时间穿', '款式耐看'],
+  },
+  {
+    classification: '食品饮料',
+    keywords: ['食品', '零食', '饮料', '咖啡', '茶', 'food', 'snack', 'coffee', 'tea', 'drink'],
+    sellingPoints: ['口味有记忆点', '适合囤货', '方便即食', '性价比高'],
+  },
+  {
+    classification: '保健',
+    keywords: ['保健', '营养', '维生素', '补剂', '镁', 'magnesium', 'supplement', 'vitamin', 'health', 'wellness', 'mineral'],
+    sellingPoints: ['成分信息明确', '日常补充方便', '适合关注健康管理人群', '规格清晰'],
+  },
+  {
+    classification: '玩具和爱好',
+    keywords: ['玩具', '手工', '编织', '毛线', '钩针', 'amigurumi', 'linha', 'balloon', 'yarn', 'crochet', 'knitting'],
+    sellingPoints: ['适合手工创作', '用途明确', '规格清晰', '适合玩偶编织'],
+  },
+  {
+    classification: '宠物用品',
+    keywords: ['宠物', '猫', '狗', '猫砂', 'pet', 'cat', 'dog'],
+    sellingPoints: ['宠物家庭适用', '省心省力', '清洁方便', '提升日常照护效率'],
+  },
+]
+
 const productClassificationOptions = [
   { label: '全部产品分类', value: '' },
   ...PRODUCT_CLASSIFICATIONS.map((classification) => ({
@@ -461,6 +867,10 @@ const pendingAnalysisJobs = ref(loadPendingAnalysisJobs())
 
 const getVersionByModel = (model) => analysisVersions.value.find((version) => version.model === model)
 const activeVersion = computed(() => getVersionByModel(currentAnalysisModel.value))
+const scriptCopySourceVersion = computed(() => {
+  if (scriptCopySourceModel.value) return getVersionByModel(scriptCopySourceModel.value) || activeVersion.value || fallbackDisplayVersion.value
+  return activeVersion.value || fallbackDisplayVersion.value
+})
 const selectedModelVersions = computed(() => selectedCompareModels.value
   .map((model) => getVersionByModel(model))
   .filter(Boolean))
@@ -523,6 +933,20 @@ const isEmptyAnalysisResult = computed(() => (
   Boolean(activeAnalysisId.value)
   && !loading.value
   && currentDisplayItems.value.length === 0
+))
+const scriptCopySourceTitle = computed(() => {
+  const formula = getVersionFormulaName(scriptCopySourceVersion.value)
+  const subtype = getVersionFormulaSubtype(scriptCopySourceVersion.value)
+  return `${currentFileName.value || '当前视频'} · ${formula} / ${subtype}`
+})
+const canSubmitScriptCopy = computed(() => (
+  Boolean(activeAnalysisId.value)
+  && Boolean(scriptCopyForm.value.model)
+  && (
+    Boolean(scriptCopyForm.value.product_name.trim())
+    || Boolean(scriptCopyForm.value.selling_points.trim())
+    || scriptCopyImageFiles.value.length > 0
+  )
 ))
 
 const isModelAvailable = (value) => modelOptions.value.some((option) => option.value === value)
@@ -590,9 +1014,48 @@ const getVersionCategoryReason = (version) => (
   || ''
 )
 
+const getVersionProductClassification = (version) => (
+  version?.product_classification
+  || getVersionFirstItem(version)?.product_classification
+  || ''
+)
+
 const getVersionSellingPoint = (version) => formatSellingPoint(getVersionFirstItem(version))
 
 const getVersionGolden3s = (version) => formatGolden3s(getVersionFirstItem(version))
+
+const getVersionGolden3sReason = (version) => (
+  getVersionFirstItem(version)?.golden_3s_reason
+  || '开头 0-3 秒通过具体问题、悬念、数据、技巧或争议制造继续观看理由。'
+)
+
+const getGolden3sRecreationText = (version) => {
+  const item = getVersionFirstItem(version)
+  const hook = item?.golden_3s_hook || ''
+  const subtype = item?.golden_3s_subtype || ''
+  if (!hook && !subtype) {
+    return '这条视频没有明确黄金3秒钩子。复刻时建议自然进入产品使用场景，用首个画面快速交代产品价值。'
+  }
+  const subtypeRules = {
+    省钱秘笈: '先抛出低价发现、隐藏福利或购买路径，再马上用产品画面证明划算不是空话。',
+    比价追问: '开头提出“哪一个更值得买”的选择题，再用后续分镜逐步给出判断理由。',
+    痛点提问: '先问目标用户正在经历的具体麻烦，再让产品进入同一个问题现场。',
+    好奇提问: '先留下一个信息缺口，再用产品细节或使用过程补上答案。',
+    成本提问: '先追问真实花费或浪费成本，再把新产品的价值换算成更容易判断的数字。',
+    槽点揭露: '先指出旧方法或热门选择的具体缺陷，再让新产品承担解决方案。',
+    价格挑衅: '用便宜选择挑战昂贵选择，再用效果、质感或规格证明它值得买。',
+    悬念验证: '先设置“到底有没有用”的测试悬念，把结论留到后面兑现。',
+    结果前置: '先展示最有冲击力的结果、数字或变化，再解释产品如何做到。',
+  }
+  const hookRules = {
+    提问式: '把开场写成目标用户能立刻代入的具体问题。',
+    挑战式: '设置一个可验证的测试或挑战，后续分镜必须兑现。',
+    '秘诀/技巧': '承诺一个具体技巧、避坑经验或购买路径，后续要交付方法。',
+    震撼数据: '用具体数字、时间、比例或价格差开场，并在后续解释来源。',
+    争议式: '用明确立场或冲突对象开场，但要落回产品真实卖点。',
+  }
+  return subtypeRules[subtype] || hookRules[hook] || '复刻开头的信息差、悬念或冲突结构，但替换为用户产品真实可证明的卖点。'
+}
 
 const canReanalyzeModel = (model) => (
   Boolean(activeAnalysisId.value && model)
@@ -811,6 +1274,353 @@ const applyAnalysisDetail = (detail) => {
   fileList.value = []
   setVideoPreview(detail.video_url || '', false)
   analysisVersion.value = Date.now()
+}
+
+const openScriptCopyPage = (version) => {
+  if (!activeAnalysisId.value) {
+    ElMessage.warning('请先选择一条已完成的视频拆解')
+    return
+  }
+  scriptCopySourceModel.value = version?.model || currentAnalysisModel.value || ''
+  revokeScriptCopyImagePreviews()
+  scriptCopyForm.value = {
+    ...createEmptyScriptCopyForm(),
+    model: isModelAvailable(currentAnalysisModel.value)
+      ? currentAnalysisModel.value
+      : modelOptions.value[0]?.value || '',
+    duration_seconds: estimateSourceDurationSeconds(version),
+  }
+  scriptCopyResult.value = null
+  scriptCopyImageList.value = []
+  scriptCopyImageFiles.value = []
+  scriptCopySellingPointsTouched.value = false
+  sellingPointsGenerating.value = false
+  sellingPointsRequestSeq.value += 1
+  lastSellingPointsProductTitle.value = ''
+  scriptCopyPageOpen.value = true
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+const backToAnalysisDetail = () => {
+  scriptCopyPageOpen.value = false
+}
+
+const estimateSourceDurationSeconds = (version) => {
+  const items = version?.data || []
+  const lastEnd = Math.max(0, ...items.map((item) => toSeconds(item.end_time)))
+  return lastEnd ? String(Math.round(lastEnd)) : ''
+}
+
+const getUploadFileKey = (file) => String(file?.uid || file?.name || file?.raw?.name || '')
+
+const revokeScriptCopyImagePreviews = (keepKeys = new Set()) => {
+  const nextUrls = {}
+  Object.entries(scriptCopyImagePreviewUrls.value).forEach(([key, url]) => {
+    if (keepKeys.has(key)) {
+      nextUrls[key] = url
+      return
+    }
+    URL.revokeObjectURL(url)
+  })
+  scriptCopyImagePreviewUrls.value = nextUrls
+}
+
+const normalizeScriptCopyUploadFiles = (uploadFiles) => {
+  const keepKeys = new Set()
+  const normalizedFiles = uploadFiles.map((file) => {
+    const key = getUploadFileKey(file)
+    if (!key) return file
+    keepKeys.add(key)
+    if (!file.url && file.raw) {
+      const existingUrl = scriptCopyImagePreviewUrls.value[key]
+      const previewUrl = existingUrl || URL.createObjectURL(file.raw)
+      scriptCopyImagePreviewUrls.value = {
+        ...scriptCopyImagePreviewUrls.value,
+        [key]: previewUrl,
+      }
+      return {
+        ...file,
+        url: previewUrl,
+      }
+    }
+    return file
+  })
+  revokeScriptCopyImagePreviews(keepKeys)
+  scriptCopyImageList.value = normalizedFiles
+  scriptCopyImageFiles.value = normalizedFiles.map((file) => file.raw).filter(Boolean)
+  generateDefaultSellingPoints()
+}
+
+const handleScriptCopyImageChange = (_file, uploadFiles) => {
+  normalizeScriptCopyUploadFiles(uploadFiles)
+}
+
+const handleScriptCopyImageRemove = (_file, uploadFiles) => {
+  normalizeScriptCopyUploadFiles(uploadFiles)
+}
+
+const scriptCopyProductText = () => [
+  scriptCopyForm.value.product_name,
+  scriptCopyForm.value.product_category,
+  scriptCopyForm.value.selling_points,
+  ...scriptCopyImageList.value.map((file) => file.name || file.raw?.name || ''),
+].join(' ').toLowerCase()
+
+const inferScriptCopyProductClassification = () => {
+  const text = scriptCopyProductText()
+  if (!text.trim()) return ''
+  const matchedRule = PRODUCT_CLASSIFICATION_RULES.find((rule) => (
+    rule.keywords.some((keyword) => text.includes(keyword.toLowerCase()))
+  ))
+  return matchedRule?.classification || ''
+}
+
+const getScriptCopyProductSourceText = () => [
+  scriptCopyForm.value.product_name,
+  scriptCopyForm.value.product_category,
+  ...scriptCopyImageList.value.map((file) => file.name || file.raw?.name || ''),
+].join(' ')
+
+const extractAttributeSellingPoints = (sourceText) => {
+  const text = sourceText.toLowerCase()
+  const points = []
+  const addPoint = (condition, point) => {
+    if (condition && !points.includes(point)) points.push(point)
+  }
+
+  addPoint(/\b(blusa|camisa)\b/.test(text), '女士上衣')
+  addPoint(/\bplus size\b|大码|大尺码/.test(text), '大码')
+  addPoint(/\bfeminina\b|women|ladies|女士|女式/.test(text), '女士')
+  addPoint(/\bsocial\b|社交|通勤|office/.test(text), '社交场合')
+  addPoint(/\bviscolinho\b|viscose|粘胶/.test(text), '粘胶纤维')
+  addPoint(/\bamigurumi\b|玩偶编织|钩织玩偶/.test(text), '玩偶编织')
+  addPoint(/\blinha\b|yarn|毛线|编织线/.test(text), '编织线')
+  addPoint(/\bballoon\b|气球线/.test(text), '气球线')
+  addPoint(/\bmagnesium\b|镁/.test(text), '镁元素补充')
+  addPoint(/\bcomplex\b|复合/.test(text), '复合配方')
+  addPoint(/\bsupplement\b|补剂|营养/.test(text), '营养补剂')
+  addPoint(/\bessential\b|基础/.test(text), '基础日常补充')
+
+  const sizeRangeMatch = sourceText.match(/\b(\d{2})\s*(?:ao|a|to|-)\s*(\d{2})\b/i)
+  if (sizeRangeMatch) addPoint(true, `${sizeRangeMatch[1]}到${sizeRangeMatch[2]}`)
+
+  const specMatches = [...sourceText.matchAll(/\b\d+(?:[.,]\d+)?\s?(?:ml|g|mg|oz|pcs|pack|capsules?)\b/gi)]
+  specMatches.forEach((match) => addPoint(true, match[0].replace(/\s+/g, '')))
+
+  return points
+}
+
+const getInferredSellingPoints = () => {
+  const text = scriptCopyProductText()
+  const matchedRule = PRODUCT_CLASSIFICATION_RULES.find((rule) => (
+    rule.keywords.some((keyword) => text.includes(keyword.toLowerCase()))
+  ))
+  const attributePoints = extractAttributeSellingPoints(getScriptCopyProductSourceText())
+  const fallbackPoints = matchedRule?.sellingPoints || ['品类明确', '适用人群明确', '使用场景清晰']
+  const points = attributePoints.length >= 2
+    ? attributePoints
+    : [...attributePoints, ...fallbackPoints]
+  return [...new Set(points)].slice(0, 6)
+}
+
+const getNormalizedProductTitle = () => scriptCopyForm.value.product_name.trim()
+
+const applyDefaultSellingPoints = ({ force = false } = {}) => {
+  if (!force && scriptCopySellingPointsTouched.value) return
+  if (!force && scriptCopyForm.value.selling_points.trim()) return
+  const points = getInferredSellingPoints()
+  if (!points.length) return
+  scriptCopyForm.value.selling_points = points.join('、').slice(0, 200)
+}
+
+const hasScriptCopyProductInput = () => (
+  Boolean(scriptCopyForm.value.product_name.trim())
+  || Boolean(scriptCopyForm.value.product_category.trim())
+  || scriptCopyImageFiles.value.length > 0
+)
+
+const buildSellingPointsFormData = () => {
+  const fd = new FormData()
+  fd.append('model', scriptCopyForm.value.model || modelOptions.value[0]?.value || 'gemini-2.5-pro')
+  const fields = [
+    'product_name',
+    'product_category',
+    'target_audience',
+    'usage_scene',
+    'price_offer',
+    'extra_requirements',
+  ]
+  fields.forEach((key) => {
+    const value = String(scriptCopyForm.value[key] || '').trim()
+    if (value) fd.append(key, value)
+  })
+  const currentSellingPoints = scriptCopyForm.value.selling_points.trim()
+  if (currentSellingPoints) fd.append('current_selling_points', currentSellingPoints)
+  scriptCopyImageFiles.value.forEach((file) => fd.append('product_images', file))
+  return fd
+}
+
+const generateDefaultSellingPoints = async ({ force = false } = {}) => {
+  if (!force && scriptCopySellingPointsTouched.value) return
+  if (!force && scriptCopyForm.value.selling_points.trim()) return
+  if (!hasScriptCopyProductInput()) return
+
+  const requestSeq = sellingPointsRequestSeq.value + 1
+  sellingPointsRequestSeq.value = requestSeq
+  sellingPointsGenerating.value = true
+  const requestedTitle = getNormalizedProductTitle()
+  if (force && requestedTitle !== lastSellingPointsProductTitle.value) {
+    scriptCopySellingPointsTouched.value = false
+    scriptCopyForm.value.selling_points = ''
+  }
+  try {
+    const res = await axios.post('/api/product-selling-points', buildSellingPointsFormData(), { timeout: 120000 })
+    if (requestSeq !== sellingPointsRequestSeq.value || (!force && scriptCopySellingPointsTouched.value)) return
+    const points = res.data.data?.selling_points || []
+    if (points.length) {
+      scriptCopyForm.value.selling_points = points.join('、').slice(0, 200)
+      lastSellingPointsProductTitle.value = requestedTitle
+      if (force) scriptCopySellingPointsTouched.value = false
+      if (res.data.data?.product_classification && !scriptCopyForm.value.product_category.trim()) {
+        scriptCopyForm.value.product_category = res.data.data.product_classification
+      }
+      return
+    }
+    applyDefaultSellingPoints({ force })
+    lastSellingPointsProductTitle.value = requestedTitle
+    if (force) scriptCopySellingPointsTouched.value = false
+  } catch (err) {
+    console.error('generate selling points failed:', err)
+    if (requestSeq === sellingPointsRequestSeq.value) {
+      applyDefaultSellingPoints({ force })
+      lastSellingPointsProductTitle.value = requestedTitle
+      if (force) scriptCopySellingPointsTouched.value = false
+    }
+  } finally {
+    if (requestSeq === sellingPointsRequestSeq.value) sellingPointsGenerating.value = false
+  }
+}
+
+const handleProductTitleBlur = () => {
+  const currentTitle = getNormalizedProductTitle()
+  if (currentTitle === lastSellingPointsProductTitle.value) {
+    generateDefaultSellingPoints()
+    return
+  }
+  scriptCopySellingPointsTouched.value = false
+  scriptCopyForm.value.selling_points = ''
+  generateDefaultSellingPoints({ force: true })
+}
+
+const handleSellingPointsInput = () => {
+  scriptCopySellingPointsTouched.value = true
+  sellingPointsRequestSeq.value += 1
+  sellingPointsGenerating.value = false
+}
+
+const appendSellingPointTag = (tag) => {
+  scriptCopySellingPointsTouched.value = true
+  const current = scriptCopyForm.value.selling_points.trim()
+  const parts = current
+    ? current.split(/[，,、\n]/).map((item) => item.trim()).filter(Boolean)
+    : []
+  if (parts.includes(tag)) return
+  const next = [...parts, tag].join('、')
+  scriptCopyForm.value.selling_points = next.slice(0, 200)
+}
+
+const confirmProductClassificationMismatch = async () => {
+  const sourceClassification = getVersionProductClassification(scriptCopySourceVersion.value)
+  const productClassification = inferScriptCopyProductClassification()
+  if (!sourceClassification || !productClassification || sourceClassification === productClassification) return true
+
+  try {
+    await ElMessageBox.confirm(
+      `参考视频产品分类是「${sourceClassification}」，当前商品更像「${productClassification}」。不同品类可能导致原脚本的场景、卖点和黄金3秒不完全适配，仍要继续生成吗？`,
+      '产品分类不一致',
+      {
+        confirmButtonText: '继续生成',
+        cancelButtonText: '返回修改',
+        type: 'warning',
+      },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+const generateScriptCopy = async () => {
+  if (!canSubmitScriptCopy.value) {
+    ElMessage.warning('请至少选择或输入需要带货的商品，或上传产品图片')
+    return
+  }
+  await generateDefaultSellingPoints({
+    force: Boolean(
+      getNormalizedProductTitle()
+      && getNormalizedProductTitle() !== lastSellingPointsProductTitle.value,
+    ),
+  })
+  const canContinue = await confirmProductClassificationMismatch()
+  if (!canContinue) return
+
+  scriptCopyLoading.value = true
+  scriptCopyResult.value = null
+  const fd = new FormData()
+  fd.append('model', scriptCopyForm.value.model)
+  if (scriptCopySourceModel.value) fd.append('source_model', scriptCopySourceModel.value)
+  Object.entries(scriptCopyForm.value).forEach(([key, value]) => {
+    if (key === 'model') return
+    if (String(value || '').trim()) fd.append(key, String(value).trim())
+  })
+  scriptCopyImageFiles.value.forEach((file) => fd.append('product_images', file))
+
+  try {
+    const res = await axios.post(`/api/analyses/${activeAnalysisId.value}/script-copy`, fd, { timeout: 180000 })
+    scriptCopyResult.value = res.data.data
+    ElMessage.success('新脚本已生成')
+  } catch (err) {
+    console.error('generate script copy failed:', err)
+    const detail = err?.response?.data?.detail || err?.response?.data?.msg || err?.message
+    ElMessage.error(detail ? `脚本生成失败：${detail}` : '脚本生成失败')
+  } finally {
+    scriptCopyLoading.value = false
+  }
+}
+
+const formatScriptCopyResultText = () => {
+  if (!scriptCopyResult.value) return ''
+  const strategy = scriptCopyResult.value.copy_strategy || {}
+  const lines = [
+    `复刻策略：${strategy.script_logic || '按源视频结构生成新脚本'}`,
+    strategy.golden_3s_recreation ? `黄金3秒：${strategy.golden_3s_recreation}` : '',
+    '',
+  ].filter((line) => line !== '')
+  ;(scriptCopyResult.value.shots || []).forEach((shot, index) => {
+    lines.push(`分镜 ${shot.shot_index || index + 1} ${shot.title || ''}`)
+    if (shot.visual_plan) lines.push(`画面：${shot.visual_plan}`)
+    if (shot.voiceover) lines.push(`口播：${shot.voiceover}`)
+    if (shot.screen_text) lines.push(`字幕：${shot.screen_text}`)
+    if (shot.new_script) lines.push(`完整脚本：${shot.new_script}`)
+    if (shot.shooting_notes) lines.push(`拍摄要点：${shot.shooting_notes}`)
+    if (shot.conversion_point) lines.push(`转化作用：${shot.conversion_point}`)
+    lines.push('')
+  })
+  if (scriptCopyResult.value.cta_options?.length) {
+    lines.push(`CTA备选：${scriptCopyResult.value.cta_options.join(' / ')}`)
+  }
+  return lines.join('\n').trim()
+}
+
+const copyGeneratedScript = async () => {
+  const text = formatScriptCopyResultText()
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制生成脚本')
+  } catch {
+    ElMessage.warning('浏览器不允许直接复制，请手动选中结果文本复制')
+  }
 }
 
 const handleCompareModelChange = (models) => {
@@ -1362,6 +2172,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (pollTimer) clearTimeout(pollTimer)
   if (isLocalPreview.value && videoPreviewUrl.value) URL.revokeObjectURL(videoPreviewUrl.value)
+  revokeScriptCopyImagePreviews()
 })
 </script>
 
@@ -1380,6 +2191,11 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
+.copy-workspace {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
 .topbar {
   display: flex;
   align-items: flex-end;
@@ -1387,6 +2203,360 @@ onBeforeUnmount(() => {
   gap: 20px;
   padding-bottom: 16px;
   border-bottom: 1px solid #d9e1ec;
+}
+
+.copy-topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-end;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #d9e1ec;
+}
+
+.copy-topbar h2 {
+  margin: 0;
+  color: #172033;
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.copy-topbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.copy-page-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+.copy-source-panel,
+.copy-form-panel,
+.copy-result-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid #dfe6f0;
+  border-radius: 8px;
+}
+
+.copy-source-panel {
+  position: sticky;
+  top: 20px;
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.copy-source-panel h3,
+.copy-form-head h3,
+.copy-result-head h3 {
+  margin: 0;
+  color: #1d2939;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.copy-source-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.copy-hook-box,
+.copy-strategy,
+.copy-cta-box {
+  padding: 12px;
+  color: #475467;
+  background: #f8fafc;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+}
+
+.copy-hook-box strong,
+.copy-strategy strong,
+.copy-cta-box strong {
+  color: #1d2939;
+  font-size: 13px;
+}
+
+.copy-hook-box p,
+.copy-strategy p,
+.copy-cta-box p {
+  margin: 6px 0 0;
+  line-height: 1.65;
+  font-size: 13px;
+}
+
+.copy-template-list {
+  display: grid;
+  gap: 10px;
+}
+
+.copy-template-item {
+  padding: 10px 0;
+  border-top: 1px solid #e5ebf3;
+}
+
+.copy-template-item span {
+  display: block;
+  margin-bottom: 4px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.copy-template-item strong {
+  color: #1d2939;
+  font-size: 14px;
+}
+
+.copy-template-item p {
+  margin: 6px 0 0;
+  color: #667085;
+  line-height: 1.55;
+  font-size: 12px;
+}
+
+.copy-main-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.copy-form-panel,
+.copy-result-panel {
+  padding: 18px;
+}
+
+.copy-form-head,
+.copy-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.copy-model-select {
+  width: 100%;
+}
+
+.copy-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 14px;
+}
+
+.required-form-item :deep(.el-form-item__label)::before {
+  content: "*";
+  margin-right: 4px;
+  color: #f04438;
+}
+
+.product-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  width: 100%;
+}
+
+.highlight-input-wrap {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.data-support-tip {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  color: #7c3aed;
+  background: #f1edff;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.selling-point-recommendations {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 16px;
+}
+
+.selling-point-recommendations strong {
+  color: #1d2939;
+  font-size: 14px;
+}
+
+.selling-point-recommendations > div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.recommend-tag {
+  cursor: pointer;
+  border-color: #eaecf5;
+  background: #f8f9fc;
+  color: #344054;
+}
+
+.recommend-tag:hover {
+  border-color: #b9d7f8;
+  color: #175cd3;
+}
+
+.advanced-copy-settings {
+  margin-top: 4px;
+  border-top: 1px solid #e5ebf3;
+  border-bottom: 1px solid #e5ebf3;
+}
+
+.advanced-copy-settings :deep(.el-collapse-item__header) {
+  height: 40px;
+  color: #667085;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.copy-upload-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(260px, 1.2fr);
+  gap: 16px;
+  align-items: start;
+  padding-top: 8px;
+}
+
+.copy-upload-row strong {
+  color: #1d2939;
+}
+
+.copy-upload-row p {
+  margin: 6px 0 0;
+  color: #667085;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+.copy-loading,
+.copy-empty-result {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  color: #667085;
+  text-align: center;
+}
+
+.copy-loading {
+  align-content: center;
+  gap: 12px;
+}
+
+.copy-result-content {
+  display: grid;
+  gap: 12px;
+}
+
+.copy-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.copy-section-title strong {
+  color: #172033;
+  font-size: 14px;
+}
+
+.copy-section-title span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.copy-shot-card {
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+}
+
+.copy-shot-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.copy-shot-head span {
+  padding: 3px 8px;
+  color: #667085;
+  background: #eef2f7;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.copy-shot-head strong {
+  color: #172033;
+}
+
+.copy-shot-head em {
+  color: #667085;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.copy-hook-line {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  color: #9f3412;
+  background: #fff7ed;
+  border-left: 3px solid #fb923c;
+  line-height: 1.6;
+  font-size: 12px;
+}
+
+.copy-shot-card dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.copy-shot-card dl div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.copy-shot-card dt {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.copy-shot-card dd {
+  margin: 0;
+  color: #344054;
+  line-height: 1.65;
+  font-size: 13px;
+}
+
+.copy-empty-shots {
+  padding: 16px;
+  color: #667085;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  font-size: 13px;
 }
 
 .topbar h2,
@@ -1765,6 +2935,27 @@ onBeforeUnmount(() => {
   margin-top: 8px;
 }
 
+.clickable-tag {
+  cursor: pointer;
+}
+
+.hook-popover strong {
+  display: block;
+  color: #1d2939;
+  font-size: 13px;
+}
+
+.hook-popover p {
+  margin: 6px 0 12px;
+  color: #475467;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+.hook-popover p:last-child {
+  margin-bottom: 0;
+}
+
 .result-actions {
   display: flex;
   flex: 0 0 auto;
@@ -1980,7 +3171,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 980px) {
-  .topbar {
+  .topbar,
+  .copy-topbar {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -1991,6 +3183,14 @@ onBeforeUnmount(() => {
 
   .analysis-shell {
     grid-template-columns: 1fr;
+  }
+
+  .copy-page-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .copy-source-panel {
+    position: static;
   }
 
   .compare-grid {
@@ -2028,6 +3228,10 @@ onBeforeUnmount(() => {
     justify-content: flex-start;
     width: 100%;
   }
+
+  .copy-upload-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -2049,6 +3253,31 @@ onBeforeUnmount(() => {
 
   .tool-bar {
     width: 100%;
+  }
+
+  .copy-topbar-actions,
+  .copy-form-head,
+  .copy-result-head {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .copy-model-select {
+    width: 100%;
+  }
+
+  .copy-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .product-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .copy-shot-card dl div {
+    grid-template-columns: 1fr;
+    gap: 3px;
   }
 
   .reanalyze-controls,
