@@ -100,12 +100,27 @@
             <p class="eyebrow">历史分析</p>
             <h3>已保存的视频拆解</h3>
           </div>
-          <el-button size="small" @click="loadHistory" :loading="historyLoading">刷新</el-button>
+          <div class="history-actions">
+            <el-select
+              v-model="selectedProductClassification"
+              class="product-filter"
+              size="small"
+              placeholder="全部产品分类"
+            >
+              <el-option
+                v-for="option in productClassificationOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <el-button size="small" @click="loadHistory" :loading="historyLoading">刷新</el-button>
+          </div>
         </div>
 
-        <div class="history-list" v-if="historyList.length > 0">
+        <div class="history-list" v-if="filteredHistoryList.length > 0">
           <article
-            v-for="item in historyList"
+            v-for="item in filteredHistoryList"
             :key="item.id"
             class="history-card"
             :class="{ active: item.id === activeAnalysisId }"
@@ -158,7 +173,7 @@
         </div>
 
         <div v-else class="history-empty">
-          {{ historyLoading ? '正在加载历史记录...' : historyError || '暂无历史记录' }}
+          {{ historyLoading ? '正在加载历史记录...' : historyError || historyEmptyText }}
         </div>
       </section>
 
@@ -370,6 +385,7 @@ const resultList = ref([])
 const analysisVersions = ref([])
 const selectedCompareModels = ref([])
 const historyList = ref([])
+const selectedProductClassification = ref('')
 const videoPreviewUrl = ref('')
 const videoUrlInput = ref('')
 const isLocalPreview = ref(false)
@@ -390,6 +406,47 @@ const granularityOptions = [
   { label: '粗略', value: 'coarse' },
   { label: '均衡', value: 'balanced' },
   { label: '精细', value: 'fine' },
+]
+
+const PRODUCT_CLASSIFICATIONS = [
+  '家居用品',
+  '厨房用品',
+  '家纺布艺',
+  '家电',
+  '女装与女士内衣',
+  '穆斯林时尚',
+  '鞋靴',
+  '美妆个护',
+  '手机与数码',
+  '电脑办公',
+  '宠物用品',
+  '母婴用品',
+  '运动与户外',
+  '玩具和爱好',
+  '家具',
+  '五金工具',
+  '家装建材',
+  '汽车与摩托车',
+  '时尚配件',
+  '食品饮料',
+  '保健',
+  '图书&杂志&音频',
+  '儿童时尚',
+  '男装与男士内衣',
+  '箱包',
+  '虚拟商品',
+  '二手',
+  '收藏品',
+  '珠宝与衍生品',
+  '票务与代金券',
+]
+
+const productClassificationOptions = [
+  { label: '全部产品分类', value: '' },
+  ...PRODUCT_CLASSIFICATIONS.map((classification) => ({
+    label: classification,
+    value: classification,
+  })),
 ]
 
 const PENDING_ANALYSIS_JOBS_KEY = 'videoAnalyzePendingAnalysisJobs'
@@ -419,6 +476,18 @@ const fallbackDisplayVersion = computed(() => {
   }
 })
 const currentDisplayItems = computed(() => fallbackDisplayVersion.value?.data || [])
+const filteredHistoryList = computed(() => {
+  if (!selectedProductClassification.value) return historyList.value
+  return historyList.value.filter((item) => (
+    !isPendingHistoryItem(item)
+    && item.product_classification === selectedProductClassification.value
+  ))
+})
+const historyEmptyText = computed(() => (
+  selectedProductClassification.value
+    ? '当前分类下暂无历史记录'
+    : '暂无历史记录'
+))
 const visibleModelVersions = computed(() => {
   if (isCompareMode.value) return selectedModelVersions.value
   return fallbackDisplayVersion.value ? [fallbackDisplayVersion.value] : []
@@ -495,6 +564,11 @@ const forgetAnalysisJob = (analysisId) => {
 }
 
 const isRunningStatus = (status) => ['queued', 'processing'].includes(status)
+const hasRunningInitialAnalysisJob = () => (
+  Boolean(currentJobId.value)
+  && isRunningStatus(jobStatus.value)
+  && !reanalyzingAnalysisId.value
+)
 
 const getVersionFirstItem = (version) => version?.data?.[0] || null
 
@@ -601,7 +675,8 @@ const getHistoryItemMeta = (item) => {
   if (isPendingHistoryItem(item)) {
     return `${item.model || '未知模型'} · 分析完成后自动生成分镜`
   }
-  return `${item.formula || '未识别模式'} / ${item.subtype || '待判断'} · ${item.shot_count || 0} 个分镜`
+  const productClassification = item.product_classification || '未识别产品分类'
+  return `${productClassification} · ${item.formula || '未识别模式'} / ${item.subtype || '待判断'} · ${item.shot_count || 0} 个分镜`
 }
 
 const normalizeJsonText = (text) => {
@@ -794,6 +869,7 @@ const startAnalyze = async () => {
     if (!currentJobId.value) throw new Error('后端未返回任务ID')
     localStorage.setItem('videoAnalyzePendingJobId', currentJobId.value)
     ElMessage.success('任务已提交，可以等待完成或稍后刷新查看历史')
+    await loadHistory({ autoSelectFirst: false })
     scheduleJobPolling(currentJobId.value, 1200)
   } catch (err) {
     console.error('analyze failed:', err)
@@ -1186,7 +1262,7 @@ const loadAnalysis = async (id, options = {}) => {
   }
 }
 
-const handleHistorySelect = (item) => {
+const handleHistorySelect = async (item) => {
   if (!item?.id) return
   if (isPendingHistoryItem(item)) {
     currentJobId.value = item.job_id || item.id
@@ -1200,6 +1276,9 @@ const handleHistorySelect = (item) => {
     localStorage.setItem('videoAnalyzePendingJobId', currentJobId.value)
     pollJobStatus(currentJobId.value, true)
     return
+  }
+  if (hasRunningInitialAnalysisJob()) {
+    await loadHistory({ autoSelectFirst: false })
   }
   loadAnalysis(item.id)
 }
@@ -1416,6 +1495,18 @@ onBeforeUnmount(() => {
 
 .history-head h3 {
   font-size: 18px;
+}
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.product-filter {
+  width: 160px;
 }
 
 .history-list {
@@ -1927,6 +2018,16 @@ onBeforeUnmount(() => {
     max-width: none;
     width: 100%;
   }
+
+  .history-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .history-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1939,6 +2040,10 @@ onBeforeUnmount(() => {
   }
 
   .video-url-input {
+    width: 100%;
+  }
+
+  .product-filter {
     width: 100%;
   }
 

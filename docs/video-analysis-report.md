@@ -118,7 +118,7 @@ AI 分析完成 → 结果写入 SQLite analyses 表 + 视频/帧存文件
 
 ### 数据存储
 
-- SQLite：保存分析记录、模型、视频路径、分镜 JSON、爆款分类、创建时间等。
+- SQLite：保存分析记录、模型、视频路径、分镜 JSON、爆款分类、产品分类、创建时间等。
 - 本地文件系统：
   - `storage/videos/` 保存原视频。
   - `storage/frames/{analysis_id}/{model}/` 保存每条分析在对应模型下的分镜图。
@@ -393,11 +393,12 @@ fallback_timestamp = start_time + max(end_time - start_time, 0.5) * 0.45
 
 ## 7. 分析维度
 
-系统的 prompt 内置了三套分类体系，并在模型返回后做规则化后处理：
+系统的 prompt 内置了三套视频分析分类体系和一套产品分类白名单，并在模型返回后做规则化后处理：
 
 - 内部爆款模式分类体系：判断 `viral_formula` 和 `formula_subtype`。
 - 卖点角度分类体系：判断 `selling_point_angle` 和 `selling_point_subtype`。
 - 黄金 3 秒钩子分类体系：判断 `golden_3s_hook` 和 `golden_3s_subtype`。
+- 产品分类白名单：判断 `product_classification`，用于历史视频列表筛选。
 
 核心原则是先判断全片主导表达方式，再按该类型的高转化叙事链路拆分分镜。
 
@@ -479,6 +480,32 @@ fallback_timestamp = start_time + max(end_time - start_time, 0.5) * 0.45
 
 如果开头只是普通铺垫、产品自然出现或无法判断，后处理会把 `golden_3s_hook`、`golden_3s_subtype`、`golden_3s_reason` 清空，不强行贴标签。
 
+### 产品分类
+
+产品分类用于历史视频列表上方的筛选控件，不参与爆款公式判断。模型输出分镜时会同时给出：
+
+- `product_category`：自由文本，描述画面中真实出现的商品品类，例如服装、护肤、清洁、工具、食品。
+- `product_classification`：固定白名单类目，只能从下列选项中选择；不确定时输出空字符串。
+
+固定类目如下：
+
+```text
+家居用品、厨房用品、家纺布艺、家电、女装与女士内衣、穆斯林时尚、鞋靴、美妆个护、
+手机与数码、电脑办公、宠物用品、母婴用品、运动与户外、玩具和爱好、家具、五金工具、
+家装建材、汽车与摩托车、时尚配件、食品饮料、保健、图书&杂志&音频、儿童时尚、
+男装与男士内衣、箱包、虚拟商品、二手、收藏品、珠宝与衍生品、票务与代金券
+```
+
+后端会用 `normalize_product_classification()` 做二次归一：
+
+1. 如果模型已经输出白名单中的精确类目，直接保留。
+2. 如果模型只输出了英文或更细的自由品类，后端会按关键词映射到白名单，例如 `beauty skincare` 归为 `美妆个护`，`手机壳和充电线` 归为 `手机与数码`。
+3. 如果无法命中白名单，保存为空字符串，不创建动态类目。
+4. 保存主记录和模型版本时，后端会把归一后的类目写入 `analyses.product_classification` 和 `analysis_versions.product_classification`。
+5. 读取旧记录时，如果数据库字段为空，后端会从已有分镜 JSON 的 `product_classification` 或 `product_category` 临时推断，便于老数据继续参与筛选。
+
+前端历史列表默认选择“全部产品分类”，此时展示所有记录。切换到某个具体类目时，只展示 `product_classification` 等于该类目的已完成分析记录；分类为空或未识别的记录不会出现在具体类目下，只会在“全部产品分类”下可见。正在排队或分析中的任务占位记录也只在“全部产品分类”下显示。
+
 ### 分类后处理规则
 
 模型返回后，后端会调用 `enrich_storyboard_result()` 做统一后处理。主要规则如下：
@@ -555,6 +582,7 @@ formula_subtype 必须从对应大类的小类中选择。
     "scene_description": "画面描述",
     "script": "台词",
     "product_category": "商品品类",
+    "product_classification": "固定产品分类；无法判断则为空字符串",
     "evidence_frame": "证据关键帧编号",
     "evidence_timestamp": 数字,
     "shot_type": "镜头类型",

@@ -252,11 +252,13 @@ class AnalysisStorageTest(unittest.TestCase):
                         "viral_formula": "分屏对比",
                         "formula_subtype": "前后分屏型",
                         "category_reason": "两个产品并列比较。",
+                        "product_classification": "美妆个护",
                     }
                 ], ensure_ascii=False),
                 "formula": "分屏对比",
                 "subtype": "前后分屏型",
                 "category_reason": "两个产品并列比较。",
+                "product_classification": "美妆个护",
                 "created_at": "2026-05-11T10:00:00+08:00",
             }
 
@@ -267,10 +269,18 @@ class AnalysisStorageTest(unittest.TestCase):
             self.assertEqual(records[0]["id"], "analysis-1")
             self.assertEqual(records[0]["shot_count"], 1)
             self.assertEqual(records[0]["cover_url"], "")
+            self.assertEqual(records[0]["product_classification"], "美妆个护")
 
             detail = main.fetch_analysis_detail("analysis-1", db_path)
             self.assertEqual(detail["filename"], "demo.mp4")
+            self.assertEqual(detail["product_classification"], "美妆个护")
             self.assertEqual(detail["data"][0]["formula_subtype"], "前后分屏型")
+            self.assertEqual(detail["versions"][0]["product_classification"], "美妆个护")
+
+    def test_product_classification_is_normalized_to_fixed_options(self):
+        self.assertEqual(main.normalize_product_classification("beauty skincare"), "美妆个护")
+        self.assertEqual(main.normalize_product_classification("手机壳和充电线"), "手机与数码")
+        self.assertEqual(main.normalize_product_classification("不在类目里的服务"), "")
 
     def test_fetch_analysis_list_includes_pending_initial_upload_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1458,6 +1468,27 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["selling_point_subtype"] == "实时演示" for item in enriched))
         self.assertTrue(all(item["golden_3s_hook"] == "提问式" for item in enriched))
         self.assertTrue(all(item["golden_3s_subtype"] == "痛点提问" for item in enriched))
+
+    def test_enrich_reclassifies_closing_brand_recommendation_as_call_to_action(self):
+        model_result = json.dumps([
+            {
+                "start_time": 51,
+                "end_time": 69,
+                "title": "产品功效",
+                "content_tag": "产品功效",
+                "scene_description": "创作者展示舞会造型的最终发型效果，并在结尾推荐观众选择 Lebeaute Hair。",
+                "script": "And this was the final result. You guys, she got me together for prom. Lebeaute Hair would definitely recommend. They got me together for prom. If you guys are looking for some bundles y'all can get for cheap and quickly, go for Lebeaute Hair.",
+                "conversion_point": "用最终造型效果和便宜快速购买理由引导观众选择该品牌。",
+                "viral_formula": "GRWM + 产品",
+                "formula_subtype": "场景驱动型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/prom-hair.mp4"))
+
+        self.assertEqual(enriched[0]["title"], "行动号召")
+        self.assertEqual(enriched[0]["content_tag"], "行动号召")
 
     def test_enrich_classifies_battle_opening_as_controversial_not_question(self):
         model_result = json.dumps([
