@@ -101,6 +101,102 @@ class AnalysisStorageTest(unittest.TestCase):
             },
         }, content)
 
+    def test_compute_visual_frame_timestamps_scales_with_duration(self):
+        short_frames = main.compute_visual_frame_timestamps(24)
+        medium_frames = main.compute_visual_frame_timestamps(75)
+        long_frames = main.compute_visual_frame_timestamps(180)
+
+        self.assertEqual(len(short_frames), 24)
+        self.assertEqual(len(medium_frames), 38)
+        self.assertEqual(len(long_frames), 52)
+        self.assertLess(short_frames[0], short_frames[-1])
+        self.assertLessEqual(long_frames[-1], 179.95)
+
+    def test_compute_visual_frame_timestamps_honors_explicit_max_frames(self):
+        frames = main.compute_visual_frame_timestamps(120, max_frames=40)
+
+        self.assertEqual(len(frames), 40)
+        self.assertAlmostEqual(frames[0], 1.35)
+        self.assertLessEqual(frames[-1], 119.95)
+
+    def test_compute_visual_frame_timestamps_respects_granularity(self):
+        coarse_frames = main.compute_visual_frame_timestamps(75, granularity="coarse")
+        balanced_frames = main.compute_visual_frame_timestamps(75, granularity="balanced")
+        fine_frames = main.compute_visual_frame_timestamps(75, granularity="fine")
+
+        self.assertEqual(len(coarse_frames), 25)
+        self.assertEqual(len(balanced_frames), 38)
+        self.assertEqual(len(fine_frames), 75)
+
+    def test_compute_visual_frame_timestamps_prioritizes_hook_and_transcript_boundaries(self):
+        transcript = "\n".join([
+            "0.00 --> 2.00 intro hook",
+            "57.00 --> 61.00 first product",
+            "118.00 --> 122.00 second product",
+            "178.00 --> 180.00 call to action",
+        ])
+
+        frames = main.compute_visual_frame_timestamps(200, granularity="balanced", transcript=transcript)
+
+        self.assertEqual(len(frames), 60)
+        self.assertIn(0.35, frames)
+        self.assertIn(1.2, frames)
+        self.assertIn(2.4, frames)
+        self.assertIn(57.2, frames)
+        self.assertIn(60.8, frames)
+        self.assertIn(118.2, frames)
+        self.assertIn(121.8, frames)
+
+    def test_compute_visual_frame_timestamps_preserves_uniform_coverage_with_dense_transcript(self):
+        transcript = "\n".join(
+            f"{start:.2f} --> {start + 1.00:.2f} line {index}"
+            for index, start in enumerate(range(0, 190, 2))
+        )
+
+        frames = main.compute_visual_frame_timestamps(200, granularity="balanced", transcript=transcript)
+
+        self.assertEqual(len(frames), 60)
+        self.assertIn(0.35, frames)
+        self.assertIn(5.0, frames)
+        self.assertIn(198.1, frames)
+
+    def test_run_analysis_pipeline_passes_transcript_to_visual_frame_sampler(self):
+        result = json.dumps([{"title": "开场", "start_time": 0, "end_time": 1}], ensure_ascii=False)
+        transcript = "57.00 --> 61.00 first product"
+        with patch.object(main, "extract_frames"), \
+             patch.object(main, "extract_audio", return_value=True), \
+             patch.object(main, "audio_to_text", return_value=transcript), \
+             patch.object(main, "sample_visual_frames", return_value=[]) as sample_frames, \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main, "print_final_prompt_for_debug"), \
+             patch.object(main, "analyze_video", return_value=result), \
+             patch.object(main, "enrich_storyboard_result", return_value=result), \
+             patch.object(main, "persist_analysis", return_value={"analysis_id": "analysis-1", "video_url": "", "data": []}):
+            main.run_analysis_pipeline("/tmp/demo.mp4", "demo.mp4", "gemini-2.5-pro", job_id="job-1")
+
+        self.assertEqual(sample_frames.call_args.kwargs["transcript"], transcript)
+
+    def test_print_final_prompt_for_debug_lists_visual_frame_timestamps_without_image_data(self):
+        visual_frames = [
+            {"id": "F01", "timestamp": 1.35, "data_url": "data:image/jpeg;base64,abc"},
+            {"id": "F02", "timestamp": 4.65, "data_url": "data:image/jpeg;base64,def"},
+        ]
+
+        with patch("builtins.print") as print_mock:
+            main.print_final_prompt_for_debug(
+                "demo.mp4",
+                "gemini-2.5-pro",
+                "PROMPT",
+                "TRANSCRIPT",
+                visual_frames,
+            )
+
+        printed = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("视觉关键帧清单", printed)
+        self.assertIn("F01 @ 1.35s", printed)
+        self.assertIn("F02 @ 4.65s", printed)
+        self.assertNotIn("data:image", printed)
+
     def test_available_model_options_empty_when_no_keys_are_configured(self):
         with patch.object(main, "GPTPROTO_API_KEY", ""), \
              patch.object(main, "OPENAI_API_KEY", ""), \
@@ -389,6 +485,63 @@ class AnalysisStorageTest(unittest.TestCase):
             self.assertFalse(video_path.exists())
             self.assertFalse(frame_dir.exists())
 
+    def test_delete_pending_initial_upload_job_cancels_running_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "analysis.db"
+            main.init_db(db_path)
+            job_id = main.create_analysis_job("large-demo.mp4", "gemini-2.5-pro", db_path=db_path)
+            main.update_analysis_job(job_id, status="processing", db_path=db_path)
+
+            event = main.job_cancel_events[job_id]
+            deleted = main.delete_analysis_record(job_id, db_path=db_path)
+
+            self.assertTrue(deleted)
+            self.assertTrue(event.is_set())
+            job = main.get_analysis_job(job_id, db_path=db_path)
+            self.assertEqual(job["status"], "canceled")
+            self.assertTrue(job["cancel_requested"])
+            self.assertEqual(main.fetch_analysis_list(db_path), [])
+
+    def test_delete_analysis_record_cancels_active_reanalysis_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "analysis.db"
+            video_path = root / "videos" / "demo.mp4"
+            video_path.parent.mkdir()
+            video_path.write_bytes(b"video")
+            main.init_db(db_path)
+            main.save_analysis_record(
+                {
+                    "id": "analysis-1",
+                    "filename": "demo.mp4",
+                    "model": "gemini-2.5-pro",
+                    "video_path": str(video_path),
+                    "video_url": "/storage/videos/demo.mp4",
+                    "result_json": "[]",
+                    "formula": "",
+                    "subtype": "",
+                    "category_reason": "",
+                    "created_at": "2026-05-11T10:00:00+08:00",
+                },
+                db_path,
+            )
+            job_id = main.create_analysis_job("demo.mp4", "gpt-4o", db_path=db_path)
+            main.update_analysis_job(
+                job_id,
+                status="processing",
+                replace_analysis_id="analysis-1",
+                db_path=db_path,
+            )
+
+            event = main.job_cancel_events[job_id]
+            deleted = main.delete_analysis_record("analysis-1", db_path=db_path)
+
+            self.assertTrue(deleted)
+            self.assertTrue(event.is_set())
+            job = main.get_analysis_job(job_id, db_path=db_path)
+            self.assertEqual(job["status"], "canceled")
+            self.assertTrue(job["cancel_requested"])
+
     def test_create_and_update_analysis_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "analysis.db"
@@ -510,6 +663,42 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertRegex(timing_kwargs["video_to_audio"], r"^\d+\.\d{2}s$")
         self.assertRegex(timing_kwargs["subtitle_analysis"], r"^\d+\.\d{2}s$")
 
+    def test_run_analysis_pipeline_prints_asr_transcript_content_for_debug(self):
+        result = json.dumps([{"title": "开场", "start_time": 0, "end_time": 1}], ensure_ascii=False)
+        transcript = "0.00 --> 2.00 your stock tundra front end is boring"
+        with patch.object(main, "extract_frames"), \
+             patch.object(main, "extract_audio", return_value=True), \
+             patch.object(main, "audio_to_text", return_value=transcript), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main, "print_final_prompt_for_debug"), \
+             patch.object(main, "analyze_video", return_value=result), \
+             patch.object(main, "enrich_storyboard_result", return_value=result), \
+             patch.object(main, "persist_analysis", return_value={"analysis_id": "analysis-1", "video_url": "", "data": []}), \
+             patch("builtins.print") as print_mock:
+            main.run_analysis_pipeline("/tmp/demo.mp4", "demo.mp4", "gemini-2.5-pro", job_id="job-1")
+
+        printed = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("ASR/字幕内容", printed)
+        self.assertIn(transcript, printed)
+
+    def test_run_analysis_pipeline_prints_asr_disabled_source_when_asr_is_off(self):
+        result = json.dumps([{"title": "开场", "start_time": 0, "end_time": 1}], ensure_ascii=False)
+        with patch.object(main, "ENABLE_ASR", False), \
+             patch.object(main, "extract_frames"), \
+             patch.object(main, "extract_audio", return_value=True), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main, "print_final_prompt_for_debug"), \
+             patch.object(main, "analyze_video", return_value=result), \
+             patch.object(main, "enrich_storyboard_result", return_value=result), \
+             patch.object(main, "persist_analysis", return_value={"analysis_id": "analysis-1", "video_url": "", "data": []}), \
+             patch("builtins.print") as print_mock:
+            main.run_analysis_pipeline("/tmp/demo.mp4", "demo.mp4", "gemini-2.5-pro", job_id="job-1")
+
+        printed = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("来源: ASR 未启用", printed)
+
     def test_run_analysis_pipeline_uses_manual_transcript_without_asr(self):
         result = json.dumps([{"title": "开场", "start_time": 0, "end_time": 1}], ensure_ascii=False)
         manual_transcript = "0.00 --> 3.08 Rule number one, read the reviews."
@@ -533,7 +722,7 @@ class AnalysisStorageTest(unittest.TestCase):
 
         extract_audio.assert_not_called()
         audio_to_text.assert_not_called()
-        build_prompt.assert_called_once_with(manual_transcript, [])
+        build_prompt.assert_called_once_with(manual_transcript, [], granularity="balanced")
         self.assertIn("使用手动字幕，跳过音频提取和 ASR", [call.args[1] for call in log_job.call_args_list])
 
     def test_run_analysis_pipeline_uses_empty_transcript_when_asr_fails(self):
@@ -550,7 +739,7 @@ class AnalysisStorageTest(unittest.TestCase):
             main.run_analysis_pipeline("/tmp/demo.mp4", "demo.mp4", "gemini-2.5-pro", job_id="job-1")
 
         audio_to_text.assert_called_once()
-        build_prompt.assert_called_once_with("", [])
+        build_prompt.assert_called_once_with("", [], granularity="balanced")
 
     def test_audio_to_text_returns_empty_when_asr_is_disabled(self):
         with patch.object(main, "ENABLE_ASR", False), \
@@ -560,6 +749,10 @@ class AnalysisStorageTest(unittest.TestCase):
 
         faster_model.assert_not_called()
         whisper_model.assert_not_called()
+
+    def test_asr_is_enabled_by_default_when_env_is_unset(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(main.is_asr_enabled_by_default())
 
     def test_cancel_analysis_job_marks_job_canceled_and_hides_internal_event(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -686,6 +879,65 @@ class AnalysisStorageTest(unittest.TestCase):
 
         self.assertTrue(all(item["formula_subtype"] == "平替对决型" for item in enriched))
 
+    def test_enrich_classifies_face_split_sunscreen_routine_as_method_comparison(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 5,
+                "title": "产品对比",
+                "scene_description": "创作者正对镜头，面部左右分区分别点涂有色防晒霜和透明防晒霜，画面文字为 Tinted Sunscreen vs. Invisible Sunscreen。",
+                "script": "Korean tinted sunscreen versus Korean invisible sunscreen. Battle of the same city because no one likes American sunscreen.",
+                "product_category": "护肤",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+                "golden_3s_hook": "提问式",
+                "golden_3s_subtype": "比价追问",
+                "golden_3s_reason": "模型误把 versus 当成提问。",
+            },
+            {
+                "start_time": 5,
+                "end_time": 12,
+                "title": "产品卖点",
+                "scene_description": "创作者在脸部一侧推开有色防晒霜，展示它均匀肤色和覆盖暗沉的效果。",
+                "script": "This one's supposed to even out your skin tone.",
+                "product_category": "护肤",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+            },
+            {
+                "start_time": 12,
+                "end_time": 18,
+                "title": "效果对比",
+                "scene_description": "创作者在脸部另一侧推开透明防晒霜，随后让左右两侧肤感和妆效形成直接比较。",
+                "script": "Now for the invisible side. This literally just melts into your skin.",
+                "product_category": "护肤",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+            },
+            {
+                "start_time": 18,
+                "end_time": 30,
+                "title": "适用人群",
+                "content_tag": "适用人群",
+                "scene_description": "创作者手持两款防晒，说明有色款像化妆替代品，透明款可叠加化妆且更自然。",
+                "script": "But ladies, this is a makeup substitute so you can't wear makeup under it. But this one is an invisible blurring sunscreen. And for the ladies, you can wear makeup under this one. And as a guy, I'm choosing this one every day because I don't want to be accused of wearing makeup.",
+                "product_category": "护肤",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "平替对决型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/sunscreen.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "分屏对比" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "方法对比型" for item in enriched))
+        self.assertTrue(all(item["golden_3s_hook"] == "争议式" for item in enriched))
+        self.assertTrue(all(item["golden_3s_subtype"] == "槽点揭露" for item in enriched))
+        self.assertIn("同一防晒需求", enriched[0]["category_reason"])
+        self.assertEqual(enriched[3]["title"], "产品卖点")
+        self.assertEqual(enriched[3]["content_tag"], "产品卖点")
+
     def test_enrich_reclassifies_first_person_competitor_price_comparison_as_alternative_showdown(self):
         model_result = json.dumps([
             {
@@ -809,6 +1061,94 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["formula_subtype"] == "开箱评测型" for item in enriched))
         self.assertIn("开箱", enriched[0]["category_reason"])
 
+    def test_enrich_reclassifies_apparel_tryon_haul_as_grwm_teaching(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 17,
+                "title": "产品信息",
+                "scene_description": "创作者穿着浅蓝色拼接无袖连衣裙面对镜头试穿，文字贴纸为 rapid fire TikTok shop haul，口播评价长度、颜色、开叉和夏季度假场景。",
+                "script": "Okay, this is cute. I thought it was gonna be too short, but it's not, and I got it in two colors. This is the Perry Winkle. It's really good quality material. It's kind of thicker, and it is stretchy.",
+                "product_category": "服装",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 17,
+                "end_time": 46,
+                "title": "产品卖点",
+                "scene_description": "创作者继续展示连衣裙下方短裤、侧开叉，并换到凉鞋近景讲重量和颜色。",
+                "script": "I'm gonna small, and it has the shorts underneath. Not with these shoes, but these shoes are my shoes of summer. They were a little bit too heavy for me to know what these look like, but they're not, and they're not as a feather.",
+                "product_category": "服装/鞋",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 113,
+                "end_time": 151,
+                "title": "真实体验",
+                "scene_description": "创作者试穿针织上衣和裤子组合，评价不是套装、裤型、弹性、尺码和墨镜重量。",
+                "script": "I love spring sweater and the pants. This is not a set, it doesn't come together. They're like a barrel, casual. If you can front and tuck this, it's really, really stretchy, and this is a small. But oversized aviators, I love, very, very lightweight.",
+                "product_category": "服装/配饰",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/grwm-haul.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "GRWM + 产品" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "教学穿插型" for item in enriched))
+        self.assertTrue(all(item["selling_point_angle"] == "轻松便捷" for item in enriched))
+        self.assertTrue(all(item["selling_point_subtype"] == "免决策" for item in enriched))
+        self.assertIn("没有拆包", enriched[0]["category_reason"])
+
+    def test_enrich_corrects_apparel_haul_story_step_overlabels(self):
+        model_result = json.dumps([
+            {
+                "start_time": 26,
+                "end_time": 48,
+                "title": "产品对比",
+                "content_tag": "产品对比",
+                "scene_description": "创作者在 rapid fire TikTok Shop haul 试穿中脱下凉鞋近距离展示，提到今年新款更轻，并说如果有猎豹纹自己会买。",
+                "script": "Not with these shoes, but these shoes are my shoes of summer. I just got these in to try, because I got these in last year in the chunky ones. They were a little bit too heavy. If they come in Cheetah, please say they do. I will get them in Cheetah.",
+                "product_category": "鞋",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 58,
+                "end_time": 74,
+                "title": "情绪营销",
+                "content_tag": "情绪营销",
+                "scene_description": "创作者在试穿 haul 中抱着一堆印花 T 恤，说明 Christian T-shirts 对她来说是 conversation starters。",
+                "script": "I have a ton of Christian T-shirts. Christian T-shirts for me are a lot of conversation starters. I bought my first Christian hat last year, the conversations that that hat has started.",
+                "product_category": "服装",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+            {
+                "start_time": 180,
+                "end_time": 197,
+                "title": "适用场景",
+                "content_tag": "适用场景",
+                "scene_description": "创作者在多件服饰试穿 haul 最后展示格纹短裤，评价它可爱舒适但对自己来说太短，不太会穿出门。",
+                "script": "Okay, last, these little boxers, they're cute. Honestly, these are a little bit short for me to like wear out of the house, but I think they're very cute, they're comfy.",
+                "product_category": "服装",
+                "viral_formula": "开箱 / ASMR",
+                "formula_subtype": "开箱评测型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/grwm-haul.mp4"))
+
+        self.assertTrue(all(item["viral_formula"] == "GRWM + 产品" for item in enriched))
+        self.assertTrue(all(item["formula_subtype"] == "教学穿插型" for item in enriched))
+        self.assertTrue(all(item["title"] == "产品卖点" for item in enriched))
+        self.assertTrue(all(item["content_tag"] == "产品卖点" for item in enriched))
+
     def test_analysis_prompt_requires_stage_based_storyboard_detail(self):
         prompt = main.build_analysis_prompt(
             transcript="00:00 --> 00:06 Which is better, the expensive one or this cheaper dupe?",
@@ -818,10 +1158,16 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("明确双对象/双方案对比", prompt)
         self.assertIn("开箱主导结构优先归为开箱 / ASMR", prompt)
         self.assertIn("视觉场景切换", prompt)
-        self.assertIn("单个分镜时长不得超过 12 秒", prompt)
+        self.assertIn("单个分镜通常控制在 6-12 秒", prompt)
+        self.assertIn("可以延长到 15-20 秒左右", prompt)
+        self.assertIn("2-5 分钟视频最多 6 个分镜", prompt)
+        self.assertIn("按商品组/叙事阶段合并", prompt)
+        self.assertIn("同一商品同一场景里的连续角度", prompt)
+        self.assertNotIn("单个分镜时长不得超过 12 秒", prompt)
         self.assertIn("分镜数量要克制", prompt)
         self.assertIn("产品对比", prompt)
         self.assertIn("如果已经形成明确双对象比较，优先用“产品对比”", prompt)
+        self.assertIn("服饰 GRWM haul 的分镜标签要按商品段的转化目的收敛", prompt)
         self.assertIn("多个连续片段都在围绕同一产品", prompt)
         self.assertIn("scene_description 至少 30 个中文字符", prompt)
         self.assertIn("script 需要覆盖该段完整口播/字幕语义", prompt)
@@ -839,6 +1185,21 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("护肤/护发/美妆/洗护 GRWM", prompt)
         self.assertIn("使用频率/适用状态", prompt)
         self.assertIn("开头的夸张情绪宣言", prompt)
+
+        coarse_prompt = main.build_analysis_prompt(
+            transcript="",
+            visual_frames=[{"id": "F01", "timestamp": 1.2, "data_url": "data:image/jpeg;base64,abc"}],
+            granularity="coarse",
+        )
+        fine_prompt = main.build_analysis_prompt(
+            transcript="",
+            visual_frames=[{"id": "F01", "timestamp": 1.2, "data_url": "data:image/jpeg;base64,abc"}],
+            granularity="fine",
+        )
+        self.assertIn("拆解粒度：粗略", coarse_prompt)
+        self.assertIn("优先合并同一商品", coarse_prompt)
+        self.assertIn("拆解粒度：精细", fine_prompt)
+        self.assertIn("保留更多有独立转化作用的视觉切点", fine_prompt)
 
     def test_normalizes_comparison_story_step_to_product_comparison(self):
         item = {
@@ -1097,6 +1458,87 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertTrue(all(item["selling_point_subtype"] == "实时演示" for item in enriched))
         self.assertTrue(all(item["golden_3s_hook"] == "提问式" for item in enriched))
         self.assertTrue(all(item["golden_3s_subtype"] == "痛点提问" for item in enriched))
+
+    def test_enrich_classifies_battle_opening_as_controversial_not_question(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 5,
+                "title": "产品对比",
+                "scene_description": "创作者正对镜头，面部左右分区分别点涂有色防晒霜和透明防晒霜，画面文字为 Tinted Sunscreen vs. Invisible Sunscreen。",
+                "script": "Korean tinted sunscreen versus Korean invisible sunscreen. Battle of the same city because no one likes American sunscreen.",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "方法对比型",
+                "golden_3s_hook": "提问式",
+                "golden_3s_subtype": "比价追问",
+                "golden_3s_reason": "模型误把 versus 当成提问。",
+            }
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/sunscreen.mp4"))
+
+        self.assertEqual(enriched[0]["golden_3s_hook"], "争议式")
+        self.assertEqual(enriched[0]["golden_3s_subtype"], "槽点揭露")
+
+    def test_enrich_refines_vehicle_feature_demo_to_product_selling_points(self):
+        model_result = json.dumps([
+            {
+                "start_time": 0,
+                "end_time": 7,
+                "title": "效果对比",
+                "content_tag": "效果对比",
+                "scene_description": "视频以一辆黑色丰田 Tundra 的原厂前脸开场，随后切到改装后车灯亮起的欢迎序列。",
+                "script": "Your stock tundra front end is boring, until this, check this insane welcome sequence.",
+                "product_category": "汽车配件",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+                "golden_3s_hook": "",
+            },
+            {
+                "start_time": 7,
+                "end_time": 9,
+                "title": "功能演示",
+                "content_tag": "功能演示",
+                "scene_description": "镜头继续对准车头，橙色转向灯以流水序列动态点亮。",
+                "script": "Sequential turn signals that pop,",
+                "product_category": "汽车配件",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+            },
+            {
+                "start_time": 9,
+                "end_time": 12,
+                "title": "功能演示",
+                "content_tag": "功能演示",
+                "scene_description": "画面切换为车灯被水枪直接冲洗，证明车灯在雨天或冲洗场景下仍可使用。",
+                "script": "IP68 waterproof, rain or shine.",
+                "product_category": "汽车配件",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+            },
+            {
+                "start_time": 12,
+                "end_time": 15,
+                "title": "行动号召",
+                "content_tag": "行动号召",
+                "scene_description": "最后展示车辆行驶画面，并用字幕引导升级 Tacoma 和点击链接。",
+                "script": "Upgrade your Tacoma today, click the link.",
+                "product_category": "汽车配件",
+                "viral_formula": "分屏对比",
+                "formula_subtype": "前后分屏型",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/tacoma.mp4"))
+
+        self.assertEqual(enriched[0]["golden_3s_hook"], "争议式")
+        self.assertEqual(enriched[0]["golden_3s_subtype"], "槽点揭露")
+        self.assertEqual(enriched[1]["title"], "产品卖点")
+        self.assertEqual(enriched[1]["content_tag"], "产品卖点")
+        self.assertEqual(enriched[2]["title"], "产品卖点")
+        self.assertEqual(enriched[2]["content_tag"], "产品卖点")
 
     def test_enrich_leaves_golden_3s_empty_when_opening_has_no_clear_hook(self):
         model_result = json.dumps([

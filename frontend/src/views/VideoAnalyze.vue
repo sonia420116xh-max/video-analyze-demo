@@ -39,6 +39,12 @@
             />
           </el-select> -->
 
+          <!-- <el-segmented
+            v-model="breakdownGranularity"
+            class="granularity-control"
+            :options="granularityOptions"
+          /> -->
+
           <el-button type="primary" @click="startAnalyze" :loading="loading" :disabled="!modelType">
             {{ loading ? '后台分析中' : '开始AI拆解' }}
           </el-button>
@@ -122,7 +128,6 @@
               <span class="history-card-head">
                 <span class="history-title">{{ item.filename }}</span>
                 <el-button
-                  v-if="!isPendingHistoryItem(item)"
                   class="history-delete"
                   size="small"
                   type="danger"
@@ -258,9 +263,9 @@
                       <el-tag v-if="getVersionGolden3s(version)" size="small" type="danger" effect="plain">
                         黄金3秒 {{ getVersionGolden3s(version) }}
                       </el-tag>
-                      <el-tag v-if="version.model" size="small" type="info" effect="plain">
+                      <!-- <el-tag v-if="version.model" size="small" type="info" effect="plain">
                         {{ version.model }}
-                      </el-tag>
+                      </el-tag> -->
                     </div>
                     <p class="category-reason" v-if="getVersionCategoryReason(version)">
                       {{ getVersionCategoryReason(version) }}
@@ -375,10 +380,17 @@ const reanalyzeModelType = ref('')
 const reanalyzingAnalysisId = ref('')
 const reanalyzingModel = ref('')
 const manualTranscript = ref('')
+const breakdownGranularity = ref('balanced')
 const analysisStatusMap = ref({})
 const analysisVersion = ref(Date.now())
 const videoRef = ref(null)
 let currentFile = null
+
+const granularityOptions = [
+  { label: '粗略', value: 'coarse' },
+  { label: '均衡', value: 'balanced' },
+  { label: '精细', value: 'fine' },
+]
 
 const PENDING_ANALYSIS_JOBS_KEY = 'videoAnalyzePendingAnalysisJobs'
 const loadPendingAnalysisJobs = () => {
@@ -771,6 +783,7 @@ const startAnalyze = async () => {
   if (sourceVideoUrl) fd.append('video_url', sourceVideoUrl)
   fd.append('model', modelType.value)
   fd.append('async_mode', 'true')
+  fd.append('breakdown_granularity', breakdownGranularity.value)
   if (manualTranscript.value.trim()) fd.append('transcript_override', manualTranscript.value.trim())
 
   try {
@@ -839,6 +852,7 @@ const reanalyzeCurrent = async (model) => {
     setAnalysisStatus(targetAnalysisId, 'queued')
     const fd = new FormData()
     fd.append('model', targetModel)
+    fd.append('breakdown_granularity', breakdownGranularity.value)
     if (manualTranscript.value.trim()) fd.append('transcript_override', manualTranscript.value.trim())
     const res = await axios.post(`/api/analyses/${targetAnalysisId}/reanalyze`, fd, { timeout: 60000 })
     currentJobId.value = res.data.job_id || ''
@@ -979,14 +993,17 @@ const pollJobStatus = async (jobId, manual = false) => {
     }
 
     if (job.status === 'completed') {
-      const completedAnalysisId = job.analysis_id || ''
+      const completedAnalysisId = job.analysis_id || affectedAnalysisId || activeAnalysisId.value || ''
       setAnalysisStatus(completedAnalysisId, 'completed')
       forgetAnalysisJob(completedAnalysisId)
       reanalyzingAnalysisId.value = ''
       reanalyzingModel.value = ''
       loading.value = false
       reanalyzeLoading.value = false
-      await loadHistory({ preferredAnalysisId: completedAnalysisId })
+      if (completedAnalysisId) {
+        await loadAnalysis(completedAnalysisId, { resumePolling: false })
+      }
+      await loadHistory({ preferredAnalysisId: completedAnalysisId, autoSelectFirst: false })
       clearJobState()
       ElMessage.success('拆解完成！')
       return
@@ -1206,17 +1223,16 @@ const clearCurrentAnalysis = () => {
 
 const confirmDeleteAnalysis = async (item) => {
   if (!item?.id) return
-  if (isPendingHistoryItem(item)) {
-    ElMessage.info('任务完成后可删除拆解记录；进行中的任务可先停止生成')
-    return
-  }
+  const isPendingItem = isPendingHistoryItem(item)
 
   try {
     await ElMessageBox.confirm(
-      `确定删除「${item.filename || '这条视频拆解'}」吗？删除后该视频、分镜图片和拆解结果都会移除。`,
-      '删除拆解记录',
+      isPendingItem
+        ? `确定删除「${item.filename || '这个分析任务'}」吗？删除后会停止后端正在进行的分析任务。`
+        : `确定删除「${item.filename || '这条视频拆解'}」吗？删除后该视频、分镜图片和拆解结果都会移除。`,
+      isPendingItem ? '删除并停止任务' : '删除拆解记录',
       {
-        confirmButtonText: '确认删除',
+        confirmButtonText: isPendingItem ? '确认删除并停止' : '确认删除',
         cancelButtonText: '取消',
         type: 'warning',
       },
@@ -1227,13 +1243,20 @@ const confirmDeleteAnalysis = async (item) => {
 
   try {
     await axios.delete(`/api/analyses/${item.id}`, { timeout: 10000 })
-    if (item.id === activeAnalysisId.value) {
+    if (isPendingItem && (item.job_id || item.id) === currentJobId.value) {
+      clearJobState()
+      loading.value = false
+      reanalyzeLoading.value = false
+      reanalyzingAnalysisId.value = ''
+      reanalyzingModel.value = ''
+    }
+    if (!isPendingItem && item.id === activeAnalysisId.value) {
       clearJobState()
       loading.value = false
       clearCurrentAnalysis()
     }
     await loadHistory()
-    ElMessage.success('已删除拆解记录')
+    ElMessage.success(isPendingItem ? '已删除任务并停止分析' : '已删除拆解记录')
   } catch (err) {
     console.error('delete analysis failed:', err)
     const detail = err?.response?.data?.detail || err?.message
@@ -1314,6 +1337,10 @@ onBeforeUnmount(() => {
 
 .model-select {
   width: 220px;
+}
+
+.granularity-control {
+  flex: 0 0 auto;
 }
 
 .video-url-input {
