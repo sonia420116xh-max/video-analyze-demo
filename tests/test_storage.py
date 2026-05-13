@@ -237,6 +237,28 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("F02 @ 4.65s", printed)
         self.assertNotIn("data:image", printed)
 
+    def test_print_script_copy_prompt_for_debug_hides_product_image_data(self):
+        visual_frames = [
+            {"id": "P01", "timestamp": 0, "data_url": "data:image/jpeg;base64,abc"},
+        ]
+
+        with patch("builtins.print") as print_mock:
+            main.print_script_copy_prompt_for_debug(
+                "analysis-1",
+                "gemini-2.5-pro",
+                "SCRIPT COPY PROMPT",
+                {"product_name": "临时牙套", "selling_points": "自然微笑"},
+                visual_frames,
+                phase="初次生成",
+            )
+
+        printed = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("脚本复刻最终 Prompt（初次生成）", printed)
+        self.assertIn("analysis-1", printed)
+        self.assertIn("SCRIPT COPY PROMPT", printed)
+        self.assertIn("P01", printed)
+        self.assertNotIn("data:image", printed)
+
     def test_available_model_options_empty_when_no_keys_are_configured(self):
         with patch.object(main, "GPTPROTO_API_KEY", ""), \
              patch.object(main, "OPENAI_API_KEY", ""), \
@@ -1777,7 +1799,8 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("开箱 / ASMR / 开箱评测型", prompt)
         self.assertIn("黄金3秒复刻", prompt)
         self.assertIn("省钱秘笈", prompt)
-        self.assertIn("先用“低价发现/隐藏福利/划算路径”", prompt)
+        self.assertIn("抽象出源视频前 3 秒的注意力机制", prompt)
+        self.assertNotIn("低价发现/隐藏福利/划算路径", prompt)
         self.assertIn("便携筋膜枪", prompt)
         self.assertIn("久坐上班族", prompt)
         self.assertIn("分镜 1", prompt)
@@ -1885,10 +1908,178 @@ class AnalysisStorageTest(unittest.TestCase):
 
         self.assertEqual(len(result["shots"]), 2)
         self.assertEqual(result["shots"][0]["title"], "用户痛点")
-        self.assertIn("Temporary Teeth Cover", result["shots"][0]["visual_plan"])
+        self.assertIn("临时牙套", result["shots"][0]["visual_plan"])
+        self.assertNotIn("Adjustable Snap-On Moldable False Teeth", result["shots"][0]["visual_plan"])
         self.assertIn("临时牙套", result["shots"][0]["screen_text"])
-        self.assertIn("源视频黄金3秒命中", result["shots"][0]["hook_implementation"])
+        self.assertNotEqual(result["shots"][0]["visual_plan"], result["shots"][1]["visual_plan"])
+        self.assertIn("0-1秒", result["shots"][0]["hook_implementation"])
+        self.assertNotIn("源视频黄金3秒命中", result["shots"][0]["hook_implementation"])
         self.assertIn("模型未返回可拍摄分镜", result["copy_strategy"]["fallback_reason"])
+
+    def test_generate_script_copy_repairs_missing_shots_before_fallback(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "title": "用户痛点",
+                    "scene_description": "先问真实花费。",
+                }
+            ],
+        }
+        first_response = json.dumps({
+            "copy_strategy": {"script_logic": "先问成本，再给方案。"},
+        }, ensure_ascii=False)
+        repaired_response = json.dumps({
+            "copy_strategy": {"script_logic": "先问成本，再给方案。"},
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "duration_seconds": 4,
+                    "title": "用户痛点",
+                    "visual_plan": "镜头怼近微笑前后对比。",
+                    "voiceover": "拍照不敢露齿，先看这个临时牙套。",
+                    "screen_text": "拍照不敢露齿？",
+                    "new_script": "镜头怼近微笑前后对比，口播拍照不敢露齿。",
+                }
+            ],
+        }, ensure_ascii=False)
+
+        with patch.object(main, "analyze_video", side_effect=[first_response, repaired_response]) as analyze:
+            result = main.generate_script_copy(
+                source_record,
+                {"product_name": "Temporary Teeth Cover", "selling_points": "临时牙套、自然微笑"},
+                "gemini-2.5-pro",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["shots"][0]["visual_plan"], "镜头怼近微笑前后对比。")
+        self.assertNotIn("fallback_reason", result["copy_strategy"])
+
+    def test_normalize_script_copy_result_cleans_script_fields_for_shooting(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 12,
+                    "title": "用户痛点",
+                    "scene_description": "先问真实花费。",
+                    "conversion_point": "通过展示专业服务的高昂价格，制造价格冲击。",
+                    "golden_3s_hook": "提问式",
+                    "golden_3s_subtype": "成本提问",
+                    "golden_3s_reason": "开头用成本提问制造参与感。",
+                }
+            ],
+        }
+        long_title = "Temporary Teeth Cover, Adjustable Snap-On Moldable False Teeth for a Natural, Comfortable Smile"
+        model_response = json.dumps({
+            "copy_strategy": {"script_logic": "先问成本，再展示产品价值。"},
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "duration_seconds": 12,
+                    "title": "用户痛点",
+                    "visual_plan": f"0-3秒展示 {long_title} 和使用前状态。",
+                    "voiceover": f"目标场景不想尴尬，先看这个 {long_title}。",
+                    "screen_text": f"{long_title}｜应急牙套",
+                    "new_script": f"画面展示 {long_title}，口播强调应急牙套。",
+                    "hook_implementation": "源视频黄金3秒命中：提问式 / 成本提问。命中依据：开头制造参与感。可拍法：0-1秒嘴部近景；1-2秒临时美牙牙套入镜；2-3秒切到微笑对比。",
+                    "shooting_notes": "镜前真人实测",
+                    "conversion_point": "通过展示专业服务的高昂价格，制造价格冲击，让用户对现有解决方案望而却步，从而为后续推出平价产品创造强烈需求和接受度。 新产品承接为：突出应急牙套、可调节大小，并引导用户关注当前优惠/购买理由。",
+                }
+            ],
+        }, ensure_ascii=False)
+
+        result = main.normalize_script_copy_result(
+            model_response,
+            source_record,
+            {"product_name": long_title, "selling_points": "应急牙套、可调节大小"},
+            "gemini-2.5-pro",
+        )
+
+        shot = result["shots"][0]
+        self.assertNotIn("Temporary Teeth Cover", shot["visual_plan"])
+        self.assertNotIn("Temporary Teeth Cover", shot["voiceover"])
+        self.assertEqual(shot["screen_text"], "应急牙套｜应急牙套")
+        self.assertTrue(shot["hook_implementation"].startswith("0-1秒"))
+        self.assertNotIn("源视频黄金3秒命中", shot["hook_implementation"])
+        self.assertLess(len(shot["conversion_point"]), 80)
+        self.assertIn("应急牙套", shot["conversion_point"])
+
+    def test_normalize_script_copy_result_uses_ai_product_short_name(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [{"start_time": 0, "end_time": 5, "title": "用户痛点"}],
+        }
+        long_title = "Temporary Teeth Cover, Adjustable Snap-On Moldable False Teeth for a Natural, Comfortable Smile"
+        model_response = json.dumps({
+            "copy_strategy": {
+                "script_logic": "先问痛点，再给方案。",
+                "product_short_name": "应急美牙贴",
+            },
+            "shots": [
+                {
+                    "shot_index": 1,
+                    "duration_seconds": 5,
+                    "title": "用户痛点",
+                    "visual_plan": f"展示 {long_title} 的使用前后。",
+                    "voiceover": f"先看这个 {long_title}。",
+                    "screen_text": f"{long_title}｜自然微笑",
+                    "new_script": f"画面展示 {long_title}。",
+                }
+            ],
+        }, ensure_ascii=False)
+
+        result = main.normalize_script_copy_result(
+            model_response,
+            source_record,
+            {"product_name": long_title, "selling_points": "自然微笑"},
+            "gemini-2.5-pro",
+        )
+
+        self.assertEqual(result["copy_strategy"]["product_short_name"], "应急美牙贴")
+        self.assertIn("应急美牙贴", result["shots"][0]["visual_plan"])
+        self.assertNotIn("临时美牙牙套", result["shots"][0]["visual_plan"])
+        self.assertNotIn("Temporary Teeth Cover", result["shots"][0]["screen_text"])
+
+    def test_fallback_unknown_product_does_not_use_teeth_template(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "开箱",
+            "subtype": "产品展示型",
+            "data": [{"start_time": 0, "end_time": 4, "title": "产品开场"}],
+        }
+        result = main.normalize_script_copy_result(
+            json.dumps({"copy_strategy": {}}, ensure_ascii=False),
+            source_record,
+            {
+                "product_name": "Portable Mini Desk Fan USB Rechargeable Quiet Cooling",
+                "selling_points": "便携、静音、USB充电",
+                "usage_scene": "办公室桌面降温",
+            },
+            "gemini-2.5-pro",
+        )
+
+        shot_text = json.dumps(result["shots"], ensure_ascii=False)
+        self.assertIn("便携", shot_text)
+        self.assertNotIn("临时美牙牙套", shot_text)
+        self.assertNotIn("嘴部", shot_text)
 
     def test_generate_script_copy_logs_generation_steps(self):
         source_record = {

@@ -1825,33 +1825,13 @@ def build_golden_3s_recreation_instruction(item):
     if not hook and not subtype and not reason:
         return "源视频没有明确命中黄金3秒；新脚本开头不要硬套强钩子，应自然进入产品场景，并用首个画面快速交代产品价值。"
 
-    subtype_rules = {
-        "省钱秘笈": "先用“低价发现/隐藏福利/划算路径”制造信息差，再立刻接产品证明，不要只喊打折。",
-        "比价追问": "先提出 X vs Y 或哪一个更值得买的问题，让观众等待答案，再用分镜逐步证明选择理由。",
-        "痛点提问": "先问目标用户正在经历的具体麻烦，再立刻给出产品进入问题现场的画面。",
-        "好奇提问": "先制造一个未揭晓的信息缺口，再用产品细节逐步填上答案。",
-        "成本提问": "先追问真实花费、浪费或单次成本，再把产品价值换算成更容易判断的数字。",
-        "槽点揭露": "先指出旧方法、热门产品或常见选择的具体缺陷，再让新产品承担解决方案。",
-        "价格挑衅": "先用便宜选择挑战昂贵选择，再用效果、质感或规格证明不是廉价感。",
-        "悬念验证": "先承诺测试或验证结果，保留结论到中后段再揭晓。",
-        "结果前置": "先把最有冲击力的结果数字或变化放出来，再倒推产品如何做到。",
-    }
-    rule = subtype_rules.get(subtype)
-    if not rule:
-        hook_rules = {
-            "提问式": "开头必须是能让目标用户代入的具体问题，不要写泛泛的“你知道吗”。",
-            "挑战式": "开头必须设置一个可验证的挑战、测试或悬念，后续分镜要兑现结果。",
-            "秘诀/技巧": "开头必须承诺一个具体技巧、避坑经验或路径信息，后续要交付可执行方法。",
-            "震撼数据": "开头必须出现具体数字、时间、比例或价格差，并在后续解释数字来源。",
-            "争议式": "开头必须有明确立场或冲突对象，但不能脱离产品真实卖点。",
-        }
-        rule = hook_rules.get(hook, "复刻开头的信息差、悬念或冲突结构，但替换为用户产品真实可证明的卖点。")
-
     return (
         f"源视频黄金3秒命中：{hook}{(' / ' + subtype) if subtype else ''}。\n"
         f"命中依据：{reason or opening_scene or opening_script}\n"
-        f"复刻方法：{rule}\n"
-        f"新脚本前 3 秒必须明确写出画面动作、屏幕字幕/口播、产品出现方式和观众继续看的理由。"
+        "复刻方法：抽象出源视频前 3 秒的注意力机制，例如信息差、冲突、问题、测试、结果前置或身份代入；"
+        "再把这个机制迁移到用户产品真实可证明的卖点上。\n"
+        "新脚本前 3 秒必须明确写出画面动作、屏幕字幕/口播、产品出现方式和观众继续看的理由，"
+        "但不要套用固定句式或把源视频的商品、价格、品牌、承诺照搬过来。"
     )
 
 
@@ -1925,6 +1905,7 @@ def build_script_copy_prompt(source_record, product_input):
   "copy_strategy": {{
     "source_formula": "{_source_formula(source_record)}",
     "source_subtype": "{_source_subtype(source_record)}",
+    "product_short_name": "给用户商品起一个中文短名，后续脚本统一使用这个短名，不要复读商品长标题",
     "script_logic": "一句话说明复刻的脚本逻辑",
     "golden_3s_recreation": "如果有黄金3秒，说明新脚本如何命中；没有则说明自然开场策略",
     "shooting_style": "整体拍摄风格",
@@ -2051,11 +2032,194 @@ def estimate_source_shot_duration(item, fallback=5):
     return duration
 
 
+def split_selling_points(product_input):
+    points = []
+    for value in [
+        product_input.get("selling_points", ""),
+        product_input.get("extra_requirements", ""),
+        product_input.get("product_category", ""),
+    ]:
+        for item in re.split(r"[，,、/\n]+", str(value or "")):
+            text = item.strip()
+            if text and text not in points:
+                points.append(text)
+    return points
+
+
+def derive_script_copy_product_short_name(product_input, preferred_name=""):
+    preferred_name = str(preferred_name or "").strip()
+    if preferred_name:
+        return preferred_name[:16]
+    product_input = normalize_script_copy_product_input(product_input)
+    category = product_input.get("product_category", "")
+    points = split_selling_points(product_input)
+    title = product_input.get("product_name", "")
+    text = f"{title} {' '.join(points)} {category}".lower()
+
+    if category:
+        return category[:16]
+    if points:
+        return points[0][:16]
+    words = re.findall(r"[A-Za-z0-9]+", title)
+    if words:
+        return " ".join(words[:3])
+    return title[:16] or "用户产品"
+
+
+def get_script_copy_point(product_input, index, default_text):
+    points = split_selling_points(product_input)
+    if not points:
+        return default_text
+    return points[min(index, len(points) - 1)]
+
+
+def build_fallback_hook_implementation(source_record, short_name, product_input):
+    golden_item = first_golden_3s_item(source_record)
+    base_instruction = build_golden_3s_recreation_instruction(golden_item)
+    usage_scene = product_input.get("usage_scene") or product_input.get("target_audience") or "目标场景"
+    first_point = get_script_copy_point(product_input, 0, "核心卖点")
+    return (
+        f"{base_instruction}\n"
+        f"可拍法：0-1秒给{usage_scene}里的真实使用前状态，字幕提出具体问题；"
+        f"1-2秒手拿{short_name}入镜，镜头切到产品细节；"
+        f"2-3秒切到产品开始解决问题的动作，字幕强调“{first_point}”，让观众想看后续证明。"
+    )
+
+
+def build_fallback_visual_plan(index, title, short_name, product_input):
+    point = get_script_copy_point(product_input, index - 1, "核心卖点")
+    plans = [
+        f"0-3秒用目标用户的使用前状态开场，手拿{short_name}快速入镜，再切到产品进入使用场景。",
+        f"拍{short_name}包装、配件和手部安装/使用步骤，镜头保持近景，让观众看清怎么用。",
+        f"拍使用前后对比：先给未使用状态，再切使用后状态，字幕标出“{point}”。",
+        f"拍产品细节和可信证据：材质、尺寸、操作、适用条件或限制，再接购买提示。",
+        f"收尾拍真人看镜头展示最终效果，旁边放产品和优惠信息，手指向购物入口。",
+    ]
+    if "痛点" in title or "开场" in title:
+        return plans[0]
+    if "功效" in title or "效果" in title:
+        return plans[2]
+    if "卖点" in title or "安全" in title:
+        return plans[3]
+    if "行动" in title or "号召" in title or "cta" in title.lower():
+        return plans[4]
+    return plans[min(index - 1, len(plans) - 1)]
+
+
+def build_fallback_voiceover(index, title, short_name, product_input):
+    usage_scene = product_input.get("usage_scene") or product_input.get("target_audience") or "目标场景"
+    point = get_script_copy_point(product_input, index - 1, "核心卖点")
+    price_offer = product_input.get("price_offer") or "现在的优惠"
+    if index == 1 or "痛点" in title or "开场" in title:
+        return f"{usage_scene}里遇到这个问题，先看这个{short_name}，重点是{point}。"
+    if "功效" in title or "效果" in title:
+        return f"直接看前后变化，{short_name}要让人一眼看到{point}。"
+    if "卖点" in title or "安全" in title:
+        return f"这段拍清楚{point}，让观众知道它为什么适合日常使用。"
+    if "行动" in title or "号召" in title or "cta" in title.lower():
+        return f"想试的话先看{price_offer}，按页面提示选择适合自己的规格。"
+    return f"这一段只讲一个点：{point}，用画面证明，不用夸张承诺。"
+
+
+def replace_product_long_title(text, product_input, preferred_name=""):
+    result = str(text or "").strip()
+    if not result:
+        return ""
+    product_input = normalize_script_copy_product_input(product_input)
+    short_name = derive_script_copy_product_short_name(product_input, preferred_name)
+    product_name = product_input.get("product_name", "").strip()
+    if product_name and len(product_name) > 24:
+        result = result.replace(product_name, short_name)
+    words = re.findall(r"[A-Za-z][A-Za-z0-9-]*", product_name)
+    if len(words) >= 5:
+        long_prefix = r"\s+".join(re.escape(word) for word in words[:8])
+        result = re.sub(long_prefix + r"(?:[\s,.-]+[A-Za-z][A-Za-z0-9-]*)*", short_name, result)
+    return re.sub(r"\s{2,}", " ", result).strip()
+
+
+def compact_hook_implementation(text, source_record, product_input, preferred_name=""):
+    short_name = derive_script_copy_product_short_name(product_input, preferred_name)
+    cleaned = replace_product_long_title(text, product_input, preferred_name)
+    if all(marker in cleaned for marker in ["0-1秒", "1-2秒", "2-3秒"]):
+        start = cleaned.find("0-1秒")
+        return cleaned[start:].strip()[:220]
+    return build_fallback_hook_implementation(source_record, short_name, product_input).split("可拍法：", 1)[-1].strip()
+
+
+def compact_conversion_point(text, product_input, index):
+    cleaned = str(text or "").strip()
+    if cleaned:
+        return cleaned[:78]
+    point = get_script_copy_point(product_input, index - 1, get_script_copy_point(product_input, 0, "核心卖点"))
+    return f"承接该分镜的叙事作用，突出{point}，推动继续观看或购买决策。"
+
+
+def normalize_script_copy_shots_for_display(shots, source_record, product_input, product_short_name=""):
+    normalized = []
+    short_name = derive_script_copy_product_short_name(product_input, product_short_name)
+    for index, shot in enumerate(shots, start=1):
+        if not isinstance(shot, dict):
+            continue
+        cleaned_shot = dict(shot)
+        for key in ["visual_plan", "voiceover", "screen_text", "new_script", "shooting_notes"]:
+            cleaned_shot[key] = replace_product_long_title(cleaned_shot.get(key, ""), product_input, short_name)
+        if index == 1:
+            cleaned_shot["hook_implementation"] = compact_hook_implementation(
+                cleaned_shot.get("hook_implementation", ""),
+                source_record,
+                product_input,
+                short_name,
+            )
+            if not cleaned_shot.get("screen_text"):
+                cleaned_shot["screen_text"] = f"{short_name}｜{get_script_copy_point(product_input, 0, '核心卖点')}"
+        else:
+            cleaned_shot["hook_implementation"] = replace_product_long_title(cleaned_shot.get("hook_implementation", ""), product_input, short_name)
+        cleaned_shot["conversion_point"] = compact_conversion_point(
+            cleaned_shot.get("conversion_point", ""),
+            product_input,
+            index,
+        )
+        normalized.append(cleaned_shot)
+    return normalized
+
+
+def build_script_copy_repair_prompt(source_record, product_input, previous_text):
+    product_input = normalize_script_copy_product_input(product_input)
+    short_name = derive_script_copy_product_short_name(product_input)
+    return f"""
+你上一次没有返回可拍摄分镜。请基于同一源视频和商品信息重新输出完整 JSON。
+
+硬性要求：
+- 只输出 JSON 对象，不要 markdown。
+- shots 必须是非空数组，分镜数量尽量等于源视频分镜数量。
+- 商品在脚本中统一称为“{short_name}”，不要反复复制英文长标题。
+- 每个分镜必须有差异化画面，不要重复“拍摄实物细节、使用动作或前后变化”这种模板句。
+- 每个分镜必须包含 visual_plan、voiceover、screen_text、new_script、shooting_notes、conversion_point。
+- 第一分镜 hook_implementation 必须写成 0-1秒、1-2秒、2-3秒的具体拍法。
+
+用户商品信息：
+{json.dumps(product_input, ensure_ascii=False)}
+
+源视频分镜模板：
+{summarize_source_shots(source_record)}
+
+上一次模型返回：
+{str(previous_text or "")[:2000]}
+
+输出格式仍然是：
+{{
+  "copy_strategy": {{"script_logic": "...", "golden_3s_recreation": "...", "shooting_style": "...", "risk_notes": []}},
+  "shots": [],
+  "cta_options": [],
+  "missing_info_questions": []
+}}
+"""
+
+
 def build_fallback_script_copy_shots(source_record, product_input):
     product_input = normalize_script_copy_product_input(product_input)
-    product_name = product_input.get("product_name") or "用户产品"
+    product_name = derive_script_copy_product_short_name(product_input)
     selling_points = product_input.get("selling_points") or "核心卖点"
-    usage_scene = product_input.get("usage_scene") or product_input.get("target_audience") or "目标使用场景"
     price_offer = product_input.get("price_offer") or "当前优惠/购买理由"
     source_items = [item for item in source_record.get("data", []) if isinstance(item, dict)]
     if not source_items:
@@ -2065,7 +2229,6 @@ def build_fallback_script_copy_shots(source_record, product_input):
             "conversion_point": "让观众理解产品适合谁、解决什么问题。",
         }]
 
-    golden_instruction = build_golden_3s_recreation_instruction(first_golden_3s_item(source_record))
     shots = []
     for index, item in enumerate(source_items, start=1):
         title = first_non_empty(item.get("title"), item.get("content_tag"), f"分镜 {index}")
@@ -2075,21 +2238,12 @@ def build_fallback_script_copy_shots(source_record, product_input):
             "把产品信息转成用户能理解的购买理由。",
         )
         is_first = index == 1
-        visual_plan = (
-            f"前 3 秒直接展示 {product_name} 和最有冲突感的使用前问题，"
-            f"用手部动作或近景把观众注意力拉到产品上。"
-            if is_first else
-            f"延续源视频“{title}”段落节奏，拍摄 {product_name} 的实物细节、使用动作或前后变化。"
-        )
+        visual_plan = build_fallback_visual_plan(index, title, product_name, product_input)
+        voiceover = build_fallback_voiceover(index, title, product_name, product_input)
         screen_text = (
-            f"{product_name}｜{selling_points}"
+            f"{product_name}｜{get_script_copy_point(product_input, 0, selling_points)}"
             if is_first else
-            first_non_empty(selling_points, usage_scene, product_name)
-        )
-        voiceover = (
-            f"如果你也在找{usage_scene}能用的办法，先看这个{product_name}。"
-            if is_first else
-            f"这一段重点拍清楚：{selling_points}，让观众知道它为什么适合{usage_scene}。"
+            first_non_empty(get_script_copy_point(product_input, index - 1, ""), selling_points, product_name)
         )
         shot = {
             "shot_index": index,
@@ -2100,7 +2254,7 @@ def build_fallback_script_copy_shots(source_record, product_input):
             "voiceover": voiceover,
             "screen_text": screen_text,
             "new_script": f"画面：{visual_plan} 口播/字幕：{voiceover}",
-            "hook_implementation": golden_instruction if is_first else "",
+            "hook_implementation": build_fallback_hook_implementation(source_record, product_name, product_input) if is_first else "",
             "shooting_notes": first_non_empty(
                 item.get("visual_tactic"),
                 "用近景、手部演示、前后对比或字幕标注把卖点拍具体。",
@@ -2126,6 +2280,11 @@ def normalize_script_copy_result(raw_text, source_record, product_input, model):
     copy_strategy = parsed.get("copy_strategy")
     if not isinstance(copy_strategy, dict):
         copy_strategy = {}
+    product_short_name = derive_script_copy_product_short_name(
+        product_input,
+        copy_strategy.get("product_short_name", ""),
+    )
+    copy_strategy["product_short_name"] = product_short_name
     shots = parsed.get("shots") or parsed.get("data") or parsed.get("items") or []
     if not isinstance(shots, list):
         shots = []
@@ -2133,6 +2292,7 @@ def normalize_script_copy_result(raw_text, source_record, product_input, model):
     if not shots:
         shots = build_fallback_script_copy_shots(source_record, product_input)
         copy_strategy.setdefault("fallback_reason", "模型未返回可拍摄分镜，系统已按源视频分镜结构生成兜底脚本。")
+    shots = normalize_script_copy_shots_for_display(shots, source_record, product_input, product_short_name)
 
     copy_strategy.setdefault("source_formula", _source_formula(source_record))
     copy_strategy.setdefault("source_subtype", _source_subtype(source_record))
@@ -2188,6 +2348,14 @@ def generate_script_copy(source_record, product_input, model, product_visual_fra
             source_shots=len(source_record.get("data", []) or []),
             product_images=len(product_visual_frames),
         )
+        print_script_copy_prompt_for_debug(
+            log_context,
+            model,
+            prompt,
+            normalize_script_copy_product_input(product_input),
+            product_visual_frames,
+            phase="初次生成",
+        )
     started_at = time.perf_counter()
     if log_context:
         log_script_copy_job(log_context, "开始调用 AI 生成新脚本", model=model)
@@ -2206,6 +2374,40 @@ def generate_script_copy(source_record, product_input, model, product_visual_fra
             raw_chars=len(raw_text or ""),
         )
     result = normalize_script_copy_result(raw_text, source_record, product_input, model)
+    if result.get("copy_strategy", {}).get("fallback_reason"):
+        repair_prompt = build_script_copy_repair_prompt(source_record, product_input, raw_text)
+        if log_context:
+            log_script_copy_job(
+                log_context,
+                "模型未返回分镜，开始二次修复",
+                repair_prompt_chars=len(repair_prompt or ""),
+            )
+            print_script_copy_prompt_for_debug(
+                log_context,
+                model,
+                repair_prompt,
+                normalize_script_copy_product_input(product_input),
+                product_visual_frames,
+                phase="二次修复",
+            )
+        repair_started_at = time.perf_counter()
+        repair_text = analyze_video(
+            "",
+            model,
+            visual_frames=product_visual_frames,
+            prompt=repair_prompt,
+        )
+        repair_seconds = time.perf_counter() - repair_started_at
+        if log_context:
+            log_script_copy_job(
+                log_context,
+                "二次修复返回",
+                elapsed=format_duration(repair_seconds),
+                raw_chars=len(repair_text or ""),
+            )
+        repaired_result = normalize_script_copy_result(repair_text, source_record, product_input, model)
+        if not repaired_result.get("copy_strategy", {}).get("fallback_reason"):
+            result = repaired_result
     if log_context:
         log_script_copy_job(
             log_context,
@@ -3446,6 +3648,25 @@ def print_final_prompt_for_debug(filename, model, prompt, transcript, visual_fra
             frame_id = frame.get("id") or "frame"
             timestamp = frame.get("timestamp", 0)
             print(f"{frame_id} @ {timestamp}s")
+    print("-" * 88)
+    print(prompt)
+    print("=" * 88 + "\n")
+
+
+def print_script_copy_prompt_for_debug(analysis_id, model, prompt, product_input, visual_frames, phase="初次生成"):
+    print("\n" + "=" * 88)
+    print(f"脚本复刻最终 Prompt（{phase}）")
+    print(f"分析ID: {analysis_id}")
+    print(f"模型: {model}")
+    print(f"产品名称: {product_input.get('product_name', '')}")
+    print(f"卖点字符数: {len(product_input.get('selling_points', '') or '')}")
+    print(f"产品图片数量: {len(visual_frames or [])}")
+    print(f"Prompt 字符数: {len(prompt or '')}")
+    if visual_frames:
+        print("产品图片清单:")
+        for frame in visual_frames:
+            frame_id = frame.get("id") or "product-image"
+            print(frame_id)
     print("-" * 88)
     print(prompt)
     print("=" * 88 + "\n")
