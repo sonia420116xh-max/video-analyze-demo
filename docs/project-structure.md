@@ -47,6 +47,8 @@
 
 “一键复制”脚本复刻不新增数据库表，也不持久化生成结果。前端从已完成分析详情中选择一个模型版本作为参考模板，把用户商品信息和可选产品图通过 `POST /api/analyses/{analysis_id}/script-copy` 发送给后端；后端即时构建脚本复刻 prompt 并调用所选模型，返回结构化脚本对象。用户上传的产品图会在前端用本地 object URL 预览，提交时作为 multipart 图片传给模型，不会写入 `storage/` 或 SQLite。
 
+已保存分镜 JSON 中常用字段的职责不同：`scene_description` 是画面描述，`script` 是原始口播/字幕，`visual_tactic` 是视觉手法，`conversion_point` 是该段推动继续观看、信任或购买的转化作用。详情页分镜正文主要展示 `scene_description` 和 `script`；一键复制页左侧“源视频结构”为了突出可复刻逻辑，分镜摘要优先展示 `conversion_point`，为空时才回退到 `scene_description`。后端脚本复刻 prompt 会同时读取这些字段，不会只依赖左侧摘要。
+
 商品默认卖点通过 `POST /api/product-selling-points` 即时生成，不写数据库。后端会把商品标题、品类、已有补充内容和可选产品图交给模型，要求输出短卖点、推断产品分类和简短依据。前端只有在该接口失败或没有返回卖点时，才使用本地规则兜底。
 
 前端在提交脚本复刻前会做两类本地辅助判断：
