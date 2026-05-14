@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -38,6 +39,53 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertEqual(content[0], {"type": "input_text", "text": "PROMPT"})
         self.assertIn({"type": "input_image", "image_url": "data:image/jpeg;base64,abc"}, content)
 
+    def test_gpt4o_parses_nested_responses_output_text(self):
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": json.dumps({
+                                "copy_strategy": {"script_logic": "先痛点再方案。"},
+                                "shots": [{"shot_index": 1, "title": "用户痛点"}],
+                                "cta_options": ["立即下单"],
+                                "missing_info_questions": [],
+                            }, ensure_ascii=False),
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch("backend.main.requests.post", return_value=response):
+            result = main.analyze_video("", "gpt-4o", "/tmp/demo.mp4")
+
+        parsed = json.loads(result)
+        self.assertEqual(parsed["copy_strategy"]["script_logic"], "先痛点再方案。")
+        self.assertEqual(parsed["shots"][0]["title"], "用户痛点")
+
+    def test_normalize_json_text_preserves_object_before_nested_arrays(self):
+        text = '''
+        {
+          "copy_strategy": {"risk_notes": ["避免夸大"]},
+          "shots": [{"title": "用户痛点"}],
+          "cta_options": ["立即下单"]
+        }
+        '''
+
+        parsed = json.loads(main.normalize_json_text(text))
+
+        self.assertEqual(parsed["shots"][0]["title"], "用户痛点")
+        self.assertEqual(parsed["copy_strategy"]["risk_notes"], ["避免夸大"])
+
     def test_gemini_keeps_gemini_model_when_visual_frames_exist(self):
         visual_frames = [
             {
@@ -65,6 +113,26 @@ class AnalysisStorageTest(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(post.call_args.args[0], "https://gptproto.com/v1/chat/completions")
         self.assertEqual(payload["model"], "gemini-2.5-pro")
+
+    def test_gemini_flash_uses_gptproto_chat_completions(self):
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": '```json\n{"shots":[{"title":"ok"}]}\n```'}}]
+        }
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch.object(main, "sample_visual_frames", return_value=[]), \
+             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch("backend.main.requests.post", return_value=response) as post:
+            result = main.analyze_video("TRANSCRIPT", "gemini-2.5-flash", "/tmp/demo.mp4")
+
+        self.assertEqual(result, '{"shots":[{"title":"ok"}]}')
+        self.assertEqual(main.parse_result_items(result), [{"title": "ok"}])
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(post.call_args.args[0], "https://gptproto.com/v1/chat/completions")
+        self.assertEqual(payload["model"], "gemini-2.5-flash")
 
     def test_gemini_retries_transient_gptproto_ssl_error(self):
         response = Mock()
@@ -277,7 +345,7 @@ class AnalysisStorageTest(unittest.TestCase):
 
         values = [option["value"] for option in options]
         labels = [option["label"] for option in options]
-        self.assertEqual(values, ["gemini-2.5-pro", "gpt-4o", "claude-sonnet-4-5-20250929"])
+        self.assertEqual(values, ["gemini-2.5-pro", "gemini-2.5-flash", "gpt-4o", "claude-sonnet-4-5-20250929"])
         self.assertEqual(labels, values)
         self.assertNotIn("gptproto", values)
         self.assertNotIn("gptproto-gpt4o", values)
@@ -1292,6 +1360,10 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn('"selling_point_angle"', prompt)
         self.assertIn('"golden_3s_hook"', prompt)
         self.assertIn("没有明确命中黄金3秒钩子时", prompt)
+        self.assertIn('"opening_hook_summary"', prompt)
+        self.assertIn('"opening_hook_evidence"', prompt)
+        self.assertIn('"viral_reason_summary"', prompt)
+        self.assertIn("即使不命中固定黄金3秒分类", prompt)
         self.assertIn("12-30 秒的镜前 GRWM POV", prompt)
         self.assertIn("通常拆成 3-4 个分镜", prompt)
         self.assertIn("GRWM + 产品 / 仪式步骤型", prompt)
@@ -1804,7 +1876,12 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("便携筋膜枪", prompt)
         self.assertIn("久坐上班族", prompt)
         self.assertIn("分镜 1", prompt)
-        self.assertIn("只复制结构、节奏、钩子和转化逻辑", prompt)
+        self.assertIn("只复制结构、节奏、钩子、证据形式和购买心理", prompt)
+        self.assertIn("new_script 不能只写画面描述", prompt)
+        self.assertIn("没有真人口播时也必须给出 screen_text", prompt)
+        self.assertIn("voiceover 和 screen_text 不允许同时为空", prompt)
+        self.assertIn("默认使用源脚本语言：英文", prompt)
+        self.assertIn("voiceover、screen_text、new_script 默认都用源脚本语言生成", prompt)
 
     def test_generate_script_copy_normalizes_model_json_object(self):
         source_record = {
@@ -1856,8 +1933,75 @@ class AnalysisStorageTest(unittest.TestCase):
         prompt = analyze.call_args.kwargs["prompt"]
         self.assertIn("护眼台灯", prompt)
         self.assertIn("比价追问", prompt)
+        self.assertIn("即使源视频没有 golden_3s 分类字段", prompt)
+        self.assertIn("必须从第一分镜提炼开头留人机制", prompt)
 
-    def test_generate_script_copy_falls_back_to_shots_when_model_omits_them(self):
+    def test_generate_script_copy_with_gpt4o_uses_responses_result_shape(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "title": "用户痛点",
+                    "scene_description": "拍照时不敢露齿。",
+                }
+            ],
+        }
+        response = Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output": [
+                {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": json.dumps({
+                                "copy_strategy": {"script_logic": "先痛点，再展示临时方案。"},
+                                "shots": [
+                                    {
+                                        "shot_index": 1,
+                                        "duration_seconds": 8,
+                                        "title": "用户痛点",
+                                        "visual_plan": "镜前近景拍不敢露齿的表情。",
+                                        "voiceover": "拍照不敢笑，先看这个临时牙套。",
+                                        "screen_text": "拍照不敢露齿？",
+                                        "new_script": "镜前近景拍不敢露齿，再展示临时牙套。",
+                                        "hook_implementation": "0-1秒嘴部近景；1-2秒字幕提问；2-3秒产品入镜承接。",
+                                        "shooting_notes": "嘴部近景和产品特写快速切换。",
+                                        "conversion_point": "用真实尴尬痛点推动继续观看。",
+                                    }
+                                ],
+                                "cta_options": ["立即下单"],
+                                "missing_info_questions": [],
+                            }, ensure_ascii=False),
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with patch.object(main, "GPTPROTO_API_KEY", "gptproto-key"), \
+             patch("backend.main.requests.post", return_value=response) as post:
+            result = main.generate_script_copy(
+                source_record,
+                {"product_name": "Temporary Teeth Cover", "selling_points": "自然微笑"},
+                "gpt-4o",
+            )
+
+        self.assertEqual(result["model"], "gpt-4o")
+        self.assertEqual(result["shots"][0]["title"], "用户痛点")
+        self.assertEqual(post.call_args.args[0], "https://gptproto.com/v1/responses")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "gpt-4o")
+        self.assertEqual(payload["input"][0]["content"][0]["type"], "input_text")
+
+    def test_generate_script_copy_raises_when_model_omits_shots_after_repair(self):
         source_record = {
             "id": "analysis-1",
             "filename": "demo.mp4",
@@ -1896,25 +2040,16 @@ class AnalysisStorageTest(unittest.TestCase):
         }, ensure_ascii=False)
 
         with patch.object(main, "analyze_video", return_value=model_response):
-            result = main.generate_script_copy(
-                source_record,
-                {
-                    "product_name": "Temporary Teeth Cover",
-                    "selling_points": "临时牙套、可调节大小、自然微笑",
-                    "usage_scene": "临时修饰牙齿",
-                },
-                "gemini-2.5-pro",
-            )
-
-        self.assertEqual(len(result["shots"]), 2)
-        self.assertEqual(result["shots"][0]["title"], "用户痛点")
-        self.assertIn("临时牙套", result["shots"][0]["visual_plan"])
-        self.assertNotIn("Adjustable Snap-On Moldable False Teeth", result["shots"][0]["visual_plan"])
-        self.assertIn("临时牙套", result["shots"][0]["screen_text"])
-        self.assertNotEqual(result["shots"][0]["visual_plan"], result["shots"][1]["visual_plan"])
-        self.assertIn("0-1秒", result["shots"][0]["hook_implementation"])
-        self.assertNotIn("源视频黄金3秒命中", result["shots"][0]["hook_implementation"])
-        self.assertIn("模型未返回可拍摄分镜", result["copy_strategy"]["fallback_reason"])
+            with self.assertRaisesRegex(RuntimeError, "模型未返回可拍摄分镜"):
+                main.generate_script_copy(
+                    source_record,
+                    {
+                        "product_name": "Temporary Teeth Cover",
+                        "selling_points": "临时牙套、可调节大小、自然微笑",
+                        "usage_scene": "临时修饰牙齿",
+                    },
+                    "gemini-2.5-pro",
+                )
 
     def test_generate_script_copy_repairs_missing_shots_before_fallback(self):
         source_record = {
@@ -2065,18 +2200,16 @@ class AnalysisStorageTest(unittest.TestCase):
             "subtype": "产品展示型",
             "data": [{"start_time": 0, "end_time": 4, "title": "产品开场"}],
         }
-        result = main.normalize_script_copy_result(
-            json.dumps({"copy_strategy": {}}, ensure_ascii=False),
+        shots = main.build_fallback_script_copy_shots(
             source_record,
             {
                 "product_name": "Portable Mini Desk Fan USB Rechargeable Quiet Cooling",
                 "selling_points": "便携、静音、USB充电",
                 "usage_scene": "办公室桌面降温",
             },
-            "gemini-2.5-pro",
         )
 
-        shot_text = json.dumps(result["shots"], ensure_ascii=False)
+        shot_text = json.dumps(shots, ensure_ascii=False)
         self.assertIn("便携", shot_text)
         self.assertNotIn("临时美牙牙套", shot_text)
         self.assertNotIn("嘴部", shot_text)
@@ -2125,6 +2258,88 @@ class AnalysisStorageTest(unittest.TestCase):
         self.assertIn("开始调用 AI 生成新脚本", messages)
         self.assertIn("AI 返回新脚本", messages)
         self.assertIn("结果归一化完成", messages)
+
+    def test_script_copy_endpoint_runs_generation_off_event_loop(self):
+        source_record = {
+            "id": "analysis-1",
+            "filename": "demo.mp4",
+            "model": "gemini-2.5-pro",
+            "formula": "分屏对比",
+            "subtype": "平替对决型",
+            "data": [{"start_time": 0, "end_time": 4, "title": "用户痛点"}],
+        }
+        expected = {"shots": [{"shot_index": 1}], "copy_strategy": {}}
+        captured = {}
+
+        async def fake_to_thread(func, *args, **kwargs):
+            captured["func"] = func
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return expected
+
+        with patch.object(main, "fetch_analysis_detail", return_value=source_record), \
+             patch.object(main.asyncio, "to_thread", side_effect=fake_to_thread):
+            result = asyncio.run(main._script_copy_impl(
+                "analysis-1",
+                "gemini-2.5-flash",
+                product_name="Temporary Teeth Cover",
+                selling_points="自然微笑",
+                product_images=[],
+            ))
+
+        self.assertEqual(result, {"code": 0, "data": expected})
+        self.assertIs(captured["func"], main.generate_script_copy)
+        self.assertEqual(captured["args"][2], "gemini-2.5-flash")
+        self.assertEqual(captured["kwargs"], {"log_context": "analysis-1"})
+
+    def test_script_copy_endpoint_defaults_generation_model_to_gpt4o(self):
+        route = next(
+            route for route in main.app.routes
+            if getattr(route, "path", "") == "/api/analyses/{analysis_id}/script-copy"
+        )
+        dependant_by_name = {param.name: param for param in route.dependant.body_params}
+
+        self.assertEqual(dependant_by_name["model"].default, "gpt-4o")
+
+    def test_analyze_endpoint_defaults_breakdown_model_to_gemini_pro(self):
+        route = next(
+            route for route in main.app.routes
+            if getattr(route, "path", "") == "/api/analyze"
+        )
+        dependant_by_name = {param.name: param for param in route.dependant.body_params}
+
+        self.assertEqual(dependant_by_name["model"].default, "gemini-2.5-pro")
+
+    def test_product_selling_points_endpoint_defaults_model_to_gpt4o(self):
+        route = next(
+            route for route in main.app.routes
+            if getattr(route, "path", "") == "/api/product-selling-points"
+        )
+        dependant_by_name = {param.name: param for param in route.dependant.body_params}
+
+        self.assertEqual(dependant_by_name["model"].default, "gpt-4o")
+
+    def test_product_selling_points_endpoint_runs_generation_off_event_loop(self):
+        expected = {"selling_points": ["便携", "好用"]}
+        captured = {}
+
+        async def fake_to_thread(func, *args, **kwargs):
+            captured["func"] = func
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return expected
+
+        with patch.object(main.asyncio, "to_thread", side_effect=fake_to_thread):
+            result = asyncio.run(main._product_selling_points_impl(
+                model="gemini-2.5-flash",
+                product_name="Temporary Teeth Cover",
+                product_images=[],
+            ))
+
+        self.assertEqual(result, {"code": 0, "data": expected})
+        self.assertIs(captured["func"], main.generate_product_selling_points)
+        self.assertEqual(captured["args"][1], "gemini-2.5-flash")
+        self.assertEqual(captured["kwargs"], {})
 
     def test_generate_product_selling_points_uses_ai_and_normalizes_list(self):
         model_response = json.dumps({

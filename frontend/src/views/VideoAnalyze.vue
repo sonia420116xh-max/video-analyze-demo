@@ -59,7 +59,16 @@
             >
               <span>{{ formatTime(item.start_time) }} - {{ formatTime(item.end_time) }}</span>
               <strong>{{ item.title || item.content_tag || `分镜 ${idx + 1}` }}</strong>
-              <p>{{ item.conversion_point || item.scene_description }}</p>
+              <dl>
+                <div>
+                  <dt>画面/转化</dt>
+                  <dd>{{ item.conversion_point || item.scene_description || '暂无画面描述' }}</dd>
+                </div>
+                <div>
+                  <dt>口播/字幕</dt>
+                  <dd>{{ formatShotScript(item) }}</dd>
+                </div>
+              </dl>
             </article>
           </div>
         </aside>
@@ -175,7 +184,7 @@
                   <el-form-item label="目标时长">
                     <el-input v-model="scriptCopyForm.duration_seconds" placeholder="例如：18 秒" />
                   </el-form-item>
-                  <!-- <el-form-item label="生成模型">
+                  <el-form-item label="生成模型">
                     <el-select
                       v-model="scriptCopyForm.model"
                       class="copy-model-select"
@@ -189,7 +198,7 @@
                         :value="option.value"
                       />
                     </el-select>
-                  </el-form-item> -->
+                  </el-form-item>
                 </div>
                 <el-form-item label="表达语气">
                   <el-input
@@ -639,6 +648,10 @@
                     <p class="category-reason" v-if="getVersionCategoryReason(version)">
                       {{ getVersionCategoryReason(version) }}
                     </p>
+                    <div v-if="getVersionViralSummary(version)" class="viral-summary-box">
+                      <strong>爆点解析</strong>
+                      <p>{{ getVersionViralSummary(version) }}</p>
+                    </div>
                   </div>
                 </div>
                 <div class="story-list" :class="{ compact: isCompareMode }">
@@ -663,7 +676,7 @@
                       <p class="scene-text">{{ item.scene_description }}</p>
                       <div class="script-block">
                         <span class="script-label">脚本/字幕</span>
-                        <blockquote class="script-text">{{ formatShotScript(item) }}</blockquote>
+                        <blockquote class="script-text" v-html="formatHighlightedShotScript(item)"></blockquote>
                       </div>
                     </div>
                   </article>
@@ -996,6 +1009,11 @@ const canSubmitScriptCopy = computed(() => (
 ))
 
 const isModelAvailable = (value) => modelOptions.value.some((option) => option.value === value)
+const preferredScriptCopyModel = () => {
+  if (isModelAvailable('gpt-4o')) return 'gpt-4o'
+  return modelOptions.value[0]?.value || ''
+}
+const preferredSellingPointsModel = () => preferredScriptCopyModel() || 'gpt-4o'
 const canStopReanalyzingModel = (model) => (
   Boolean(model)
   && isActiveReanalysisRunning.value
@@ -1075,12 +1093,29 @@ const getVersionGolden3sReason = (version) => (
   || '开头 0-3 秒通过具体问题、悬念、数据、技巧或争议制造继续观看理由。'
 )
 
+const getVersionOpeningHookSummary = (version) => (
+  getVersionFirstItem(version)?.opening_hook_summary
+  || getVersionFirstItem(version)?.golden_3s_reason
+  || ''
+)
+
+const getVersionOpeningHookEvidence = (version) => (
+  getVersionFirstItem(version)?.opening_hook_evidence
+  || getVersionFirstItem(version)?.script
+  || ''
+)
+
+const getVersionViralSummary = (version) => (
+  getVersionFirstItem(version)?.viral_reason_summary
+  || ''
+)
+
 const getGolden3sRecreationText = (version) => {
   const item = getVersionFirstItem(version)
   const hook = item?.golden_3s_hook || ''
   const subtype = item?.golden_3s_subtype || ''
   if (!hook && !subtype) {
-    return '这条视频没有明确黄金3秒钩子。复刻时建议自然进入产品使用场景，用首个画面快速交代产品价值。'
+    return getVersionOpeningHookSummary(version) || '这条视频没有命中固定黄金3秒分类，但仍要复刻第一分镜的留人机制，用首个画面快速制造继续观看理由。'
   }
   const subtypeRules = {
     省钱秘笈: '先抛出低价发现、隐藏福利或购买路径，再马上用产品画面证明划算不是空话。',
@@ -1244,6 +1279,35 @@ const formatShotScript = (item) => {
   return script
 }
 
+const escapeHtml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const formatHighlightedShotScript = (item) => {
+  const script = formatShotScript(item)
+  const evidence = String(item?.opening_hook_evidence || item?.golden_3s_reason || '').trim()
+  if (!evidence || script === '该段无有效口播/字幕') return escapeHtml(script)
+  const candidates = [
+    evidence,
+    ...evidence.split(/[。.!！？?\n]/),
+  ].map((text) => text.trim()).filter((text) => text.length >= 4)
+
+  let highlighted = escapeHtml(script)
+  for (const candidate of candidates) {
+    const escapedCandidate = escapeHtml(candidate)
+    if (!escapedCandidate || !highlighted.includes(escapedCandidate)) continue
+    highlighted = highlighted.replace(
+      escapedCandidate,
+      `<mark class="golden-script-highlight">${escapedCandidate}</mark>`,
+    )
+    return highlighted
+  }
+  return highlighted
+}
+
 const getImageUrl = (url) => `${url}?v=${analysisVersion.value}`
 
 const formatTaxonomyLabel = (primary, subtype) => {
@@ -1331,9 +1395,7 @@ const openScriptCopyPage = (version) => {
   revokeScriptCopyImagePreviews()
   scriptCopyForm.value = {
     ...createEmptyScriptCopyForm(),
-    model: isModelAvailable(currentAnalysisModel.value)
-      ? currentAnalysisModel.value
-      : modelOptions.value[0]?.value || '',
+    model: preferredScriptCopyModel(),
     duration_seconds: estimateSourceDurationSeconds(version),
   }
   scriptCopyResult.value = null
@@ -1382,14 +1444,28 @@ const getShotScriptTranslation = (item) => (
   || ''
 )
 
+const formatGeneratedScriptText = (shot) => [
+  shot.voiceover ? `口播：${shot.voiceover}` : '',
+  shot.screen_text ? `字幕：${shot.screen_text}` : '',
+].filter(Boolean).join('\n') || shot.new_script || ''
+
 const buildSourceScriptExportRows = () => (scriptCopySourceVersion.value?.data || []).map((item, index) => ({
   sequence: index + 1,
   structure: item.title || item.content_tag || item.narrative_role || `分镜 ${index + 1}`,
   timeRange: formatExportTimeRange(item.start_time, item.end_time),
   imageUrl: item.image_url ? getImageUrl(item.image_url) : '',
   scriptText: getShotScriptText(item),
-  scriptTranslation: getShotScriptTranslation(item),
-  description: item.scene_description || item.conversion_point || '',
+  scriptTranslation: [
+    getShotScriptTranslation(item),
+    index === 0 && item.opening_hook_evidence ? `黄金3秒证据：${item.opening_hook_evidence}` : '',
+  ].filter(Boolean).join('\n'),
+  description: [
+    item.scene_description || '',
+    item.conversion_point ? `转化作用：${item.conversion_point}` : '',
+    index === 0 && item.opening_hook_summary ? `开头爆点：${item.opening_hook_summary}` : '',
+    index === 0 && item.viral_reason_summary ? `爆款解析：${item.viral_reason_summary}` : '',
+    item.visual_tactic ? `拍摄手法：${item.visual_tactic}` : '',
+  ].filter(Boolean).join('\n'),
 }))
 
 const buildGeneratedScriptExportRows = () => (scriptCopyResult.value?.shots || []).map((shot, index) => ({
@@ -1397,11 +1473,11 @@ const buildGeneratedScriptExportRows = () => (scriptCopyResult.value?.shots || [
   structure: shot.title || `分镜 ${index + 1}`,
   timeRange: shot.duration_seconds ? `${shot.duration_seconds}s` : '',
   imageUrl: '',
-  scriptText: shot.new_script || [shot.visual_plan, shot.voiceover, shot.screen_text].filter(Boolean).join('\n'),
-  scriptTranslation: shot.voiceover || '',
+  scriptText: formatGeneratedScriptText(shot),
+  scriptTranslation: '',
   description: [
     shot.visual_plan ? `画面：${shot.visual_plan}` : '',
-    shot.screen_text ? `字幕：${shot.screen_text}` : '',
+    shot.new_script ? `完整脚本：${shot.new_script}` : '',
     shot.shooting_notes ? `拍摄要点：${shot.shooting_notes}` : '',
     shot.conversion_point ? `转化作用：${shot.conversion_point}` : '',
     shot.hook_implementation ? `黄金3秒：${shot.hook_implementation}` : '',
@@ -1669,7 +1745,7 @@ const hasScriptCopyProductInput = () => (
 
 const buildSellingPointsFormData = () => {
   const fd = new FormData()
-  fd.append('model', scriptCopyForm.value.model || modelOptions.value[0]?.value || 'gemini-2.5-pro')
+  fd.append('model', scriptCopyForm.value.model || preferredSellingPointsModel())
   const fields = [
     'product_name',
     'product_category',
@@ -2506,7 +2582,8 @@ onBeforeUnmount(() => {
 
 .copy-hook-box,
 .copy-strategy,
-.copy-cta-box {
+.copy-cta-box,
+.viral-summary-box {
   padding: 12px;
   color: #475467;
   background: #f8fafc;
@@ -2516,17 +2593,30 @@ onBeforeUnmount(() => {
 
 .copy-hook-box strong,
 .copy-strategy strong,
-.copy-cta-box strong {
+.copy-cta-box strong,
+.viral-summary-box strong {
   color: #1d2939;
   font-size: 13px;
 }
 
 .copy-hook-box p,
 .copy-strategy p,
-.copy-cta-box p {
+.copy-cta-box p,
+.viral-summary-box p {
   margin: 6px 0 0;
   line-height: 1.65;
   font-size: 13px;
+}
+
+.viral-summary-box {
+  margin-top: 10px;
+}
+
+.golden-script-highlight {
+  padding: 1px 3px;
+  color: #9f3412;
+  background: #ffedd5;
+  border-radius: 4px;
 }
 
 .copy-template-list {
@@ -2552,8 +2642,25 @@ onBeforeUnmount(() => {
   font-size: 14px;
 }
 
-.copy-template-item p {
-  margin: 6px 0 0;
+.copy-template-item dl {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+
+.copy-template-item dl div {
+  display: grid;
+  gap: 3px;
+}
+
+.copy-template-item dt {
+  color: #98a2b3;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.copy-template-item dd {
+  margin: 0;
   color: #667085;
   line-height: 1.55;
   font-size: 12px;
