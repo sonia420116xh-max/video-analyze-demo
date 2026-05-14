@@ -1337,6 +1337,72 @@ def extract_transcript_time_ranges(transcript):
     return ranges
 
 
+def extract_transcript_segments(transcript):
+    segments = []
+    for line in str(transcript or "").splitlines():
+        match = re.match(
+            r"\s*(?P<start>\d+(?:[.,]\d+)?|\d+:\d+(?::\d+)?(?:[.,]\d+)?)\s*-->\s*"
+            r"(?P<end>\d+(?:[.,]\d+)?|\d+:\d+(?::\d+)?(?:[.,]\d+)?)\s*(?P<text>.*)\s*$",
+            line,
+        )
+        if not match:
+            continue
+        start = parse_time_value(match.group("start"), None)
+        end = parse_time_value(match.group("end"), None)
+        text = match.group("text").strip()
+        if start is None or end is None or not text:
+            continue
+        if end < start:
+            start, end = end, start
+        segments.append({"start": start, "end": end, "text": text})
+    return segments
+
+
+def transcript_text_for_time_range(transcript_segments, start_time, end_time):
+    if not transcript_segments:
+        return ""
+    start = parse_time_value(start_time, 0)
+    end = parse_time_value(end_time, start)
+    if end < start:
+        start, end = end, start
+
+    selected = []
+    for segment in transcript_segments:
+        segment_duration = max(segment["end"] - segment["start"], 0.01)
+        midpoint = segment["start"] + segment_duration * 0.5
+        overlap = min(end, segment["end"]) - max(start, segment["start"])
+        if start <= midpoint < end or overlap / segment_duration >= 0.6:
+            selected.append(segment["text"])
+    return " ".join(selected).strip()
+
+
+def text_has_cjk(text):
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+def fill_storyboard_scripts_from_transcript(items, transcript):
+    transcript_segments = extract_transcript_segments(transcript)
+    if not transcript_segments:
+        return items
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        transcript_script = transcript_text_for_time_range(
+            transcript_segments,
+            item.get("start_time", 0),
+            item.get("end_time", 0),
+        )
+        if not transcript_script:
+            continue
+
+        existing_script = str(item.get("script", "") or "").strip()
+        if existing_script and existing_script != transcript_script and text_has_cjk(existing_script) and not item.get("script_translation"):
+            item["script_translation"] = existing_script
+        item["script"] = transcript_script
+    return items
+
+
 def clamp_timestamp(timestamp, duration):
     return min(max(float(timestamp), 0), max(float(duration or 0) - 0.05, 0))
 
@@ -1615,136 +1681,201 @@ def build_granularity_instruction(granularity):
 def build_analysis_prompt(transcript, visual_frames=None, granularity="balanced"):
     visual_frames = visual_frames or []
     granularity_note = build_granularity_instruction(granularity)
-    visual_note = """
-你还会收到按时间顺序排列的视频关键帧图片，每张图都有编号和时间点，例如 F01 1.2s。
+
+    # 视觉帧相关说明
+    if visual_frames:
+        frame_list = "\n".join([
+            f"- {f['id']} @ {f['timestamp']}s"
+            for f in visual_frames
+        ])
+        visual_note = f"""
+你还会收到按时间顺序排列的视频关键帧图片，每张图都有编号和时间点。
 分类、商品品类、场景和分镜必须优先依据关键帧画面证据；字幕或音频可能只是背景音乐歌词，不能把无关歌词当成商品说明。
+每个分镜必须绑定一个 evidence_frame 和 evidence_timestamp，描述只能来自该分镜证据帧附近的画面。
 如果画面显示服装试穿、穿搭展示、换装、转身展示版型，请识别为服饰/穿搭相关内容，不要写成护肤品、清洁用品或其他画面中不存在的品类。
-每个分镜必须绑定一个 evidence_frame 和 evidence_timestamp，描述只能来自该分镜证据帧附近的画面，不要把其他关键帧里的颜色、款式、商品串到当前分镜。
-script 字段只写该时间段真实口播或真实字幕原文；如果只有画面展示、背景音乐歌词或无关音频，script 写“无有效口播/字幕”，不要把画面描述改写成脚本，也不要编造创作者说过的推销话术。
-服装试穿、开箱 haul 类视频请优先按“叙事阶段/核心转化目的”拆分，而不是按每一句口播或每个小动作拆分；同一商品的不同尺码讨论、颜色展示、多个角度展示、连续试穿反馈，除非转化目的明显变化，否则应合并为一个分镜。
-但重大视觉场景切换（如从单人试穿切换到两个产品同框对比、从清洁特写切换到手持手机展示价格页面、从室内场景切换到室外场景）优先于叙事目的合并，应拆分为独立分镜；同一商品、同一场景、同一转化目的下的连续角度展示或轻微机位变化可以合并。
-""" if visual_frames else """
+关键帧清单：
+{frame_list}
+"""
+    else:
+        visual_note = """
 你只会收到音频转写，因此如果字幕内容像背景音乐歌词、缺少商品信息，请在分类和分镜中保持保守，不要编造画面里不存在的产品。
 """
 
+    scene_description_rules = """
+        【scene_description 画面描述规范 - 严格区分于分析解读】
+        scene_description 的职责是"画面白描"，让没看过视频的人能靠文字还原画面。必须遵守：
+
+        1. 客观白描优先：只写镜头里真实出现的人、物、动作、位置、文字、颜色、材质。禁止写"旨在...""为了...""建立...""强化...""证明..."等目的性分析语言。
+        2. 人物具体化：如果画面中出现人物，描述其可见特征（发色、发型、肤色、穿着、表情、姿态），不要泛称"创作者""女士"。例如："一位金发女士""一位穿黑色吊带的深肤色女性"。
+        3. 动作链具体化：按时间顺序写清手部/面部/产品的具体动作，例如"用食指蘸取盘中左下角的香槟色亮片，点涂在上眼睑中央"，而不是"展示产品使用方法"。
+        4. 产品只描述可见形态：不要过度推断品类名。看到"一个圆形盘状彩妆品，内含四格不同颜色的粉块"即可，不要强行命名为"四色修容高光腮红盘"（除非包装/口播明确写了这个品名）。
+        5. 画面文字必须原样提取：如果画面中有英文/其他语言字幕、贴纸、包装文字，必须原样写出（如"Lazy girl full glam"），不要翻译或改写。中文画面描述里保留原文，翻译可放在 script 字段。
+        6. 画面结果客观描述：写"脸颊呈现珠光质感"而不是"展现出自然的光泽和立体感"；写"手臂上出现四道彩色试色条"而不是"展示了极高的显色度"。
+        7. 禁止在 scene_description 中复述 conversion_point 的内容：所有关于"这一段承担什么转化作用""为什么让用户想买"的分析，只能写在 conversion_point 和 visual_tactic 字段。
+
+        错误示例（禁止）：
+        "创作者手持一个金色的四色修容高光腮红盘，用化妆刷在盘中打圈蘸取所有颜色。随后，她将刷子直接刷在自己的脸颊上，展示产品'一刷完成'的核心用法，屏幕上配有'懒人全妆'的字幕，旨在通过一个快速动作展示产品的便捷性，建立观众对产品效果的期待。"
+        → 问题：塞了品类推断（四色修容高光腮红盘）、主观解读（核心用法）、目的分析（旨在...建立...）、画面文字被翻译（懒人全妆）。
+
+        正确示例：
+        "一位金发女士手持一个圆形多色粉盘，盘内分四格，颜色从浅米到深棕不等。她用一支蓬松化妆刷在盘中打圈混合颜色，随后将刷子斜扫在自己右侧脸颊上。画面左下角出现白色手写体字幕'Lazy girl full glam'。刷过的皮肤呈现均匀的暖调珠光。"
+        → 特点：人物具体、动作链清晰、产品只描述形态、画面文字原样保留、无目的性分析。
+        """
+
+    script_field_rules = """
+【script 字段规范】
+- 如果有真实口播或销售字幕，保留原语言原文。
+- 如果该段没有口播，但画面中有文字贴纸/包装文字/屏幕字幕，且这些文字对理解画面必要，script 写："[画面文字] 原文内容"。
+- 如果只有背景音乐歌词或纯画面展示，script 固定写"无有效口播/字幕"。
+- 禁止在 script 中写画面动作描述（画面动作只写在 scene_description）。
+"""
+
+    # 新增：结构化输出约束 + 决策树 + 反例
+    structured_constraints = """
+【JSON Schema 与枚举约束 - 严格遵守】
+输出必须是 JSON 数组，每个元素为对象，字段约束如下：
+- start_time: number（秒）
+- end_time: number（秒）
+- title: 必须从全局叙事步骤词库选择，严禁自创
+- content_tag: 必须与 title 同枚举，贴合该段真实内容
+- scene_description: string，≥30 中文字符，写清人物动作、商品状态/款式、镜头关系、该段在爆款叙事中的作用
+- script: string，保留该段完整口播/字幕原文；无有效口播时固定写"无有效口播/字幕"，禁止复述画面描述或编造推销话术
+- product_category: string，依据关键帧画面判断的真实商品品类，禁止依据音频歌词猜测
+- product_classification: 必须从产品分类白名单选择；无法判断输出空字符串""
+- evidence_frame: string，例如"F03"
+- evidence_timestamp: number
+- shot_type: string，如特写/镜前特写/分屏/对比/第一人称/全景
+- viral_formula: enum["第一人称视角","开箱 / ASMR","GRWM + 产品","分屏对比","日常 Vlog"]
+- formula_subtype: 必须从对应大类小类中选择（见分类体系），禁止创造新小类
+- category_reason: string，简洁说明判定依据
+- selling_point_angle: enum["专家背书","展示效果","轻松便捷","制造紧迫感","天然安全","价格优势","贩卖生活方式",""]
+- selling_point_subtype: 必须从对应角度小类中选择
+- selling_point_reason: string，说明解决的是信任/效果/省事/紧迫/安全/省钱/生活方式想象
+- golden_3s_hook: enum["提问式","挑战式","秘诀/技巧","震撼数据","争议式",""]，仅开头0-3秒有强钩子时填写，否则留空
+- golden_3s_subtype: 对应钩子下的小类，无则留空
+- golden_3s_reason: string，仅引用开头0-3秒证据，无则留空
+- opening_hook_summary: string，必须输出，总结开头留人机制（即使不命中固定黄金3秒分类）
+- opening_hook_evidence: string，必须输出，引用开头关键台词/字幕/画面
+- viral_reason_summary: string，必须输出，中文分点总结爆点（至少覆盖2个维度）
+- visual_tactic: string，该段视觉手法
+- conversion_point: string，具体到"为什么让用户更想买/更信任/更省钱/更理解差异"，禁止写空泛的"促进转化"
+"""
+
+    classification_decision_tree = """
+【分类决策树 - 严格按优先级执行】
+判断 viral_formula 时，按以下顺序匹配，一旦命中即停止；如果同时命中多个，选择贯穿全片最多、承担转化最强的：
+
+1. 分屏对比：画面存在左右/上下分屏、前后对比、有无产品对比、竞品同框、淘汰赛式测试。核心是直观证明差异。
+   - 小类选择：
+     * 同一商品不同颜色/尺码/姿态的左右分屏 → 产品对比型（不是前后分屏型）
+     * 同一面部/同一空间左右涂抹两种方案（如两种防晒）→ 方法对比型
+     * 多个产品逐个测试筛选淘汰 → 淘汰赛型
+     * 必须有明确双对象/双方案+替代价值表达（cheaper/dupe/alternative/save money/price/per serving/贵价/大牌/竞品/常规方案）→ 平替对决型
+     * 同一对象使用前vs使用后、有产品vs无产品 → 前后分屏型
+
+2. 开箱 / ASMR：视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、摩擦/撕膜/摆放。
+   - 反例：服饰 TikTok Shop haul 若无拆包/包装/拆开/取出证据，创作者已穿在身上或镜前连续试穿多件服装 → 优先 GRWM + 产品 / 教学穿插型（不要仅因"haul"语境判为开箱）
+   - 反例：单一品牌开箱中提到 sale/kids size/cheaper → 只影响分镜标签（优惠活动/价格促销），不改变全片主类为分屏对比或价格优势
+
+3. GRWM + 产品：创作者在镜前/浴室/卧室/化妆/护肤/穿搭/整理流程中亲自使用产品。
+   - 服饰镜前 POV 试穿：按正面亮相→侧身/背面转身→版型/洗水/剪裁/尺码/购买信息顺序展示单件服装 → 仪式步骤型（不要创造"穿搭展示型"等体系外小类）
+   - 护肤/护发/美妆/洗护：出现使用频率、操作步骤（按摩/涂抹/清洗/梳理）、成分说明、使用后体验中至少两类 → 仪式步骤型（即使开头有强情绪钩子或个人困扰，也不要覆盖全片小类为情感叙事型）
+   - 浴室/镜前护发洗护流程，即使字幕写 POV → 仪式步骤型（不要因 POV 文案判为第一人称视角，也不要因使用前后效果判为分屏对比）
+
+4. 第一人称视角：手持近景、POV、像观众亲手体验；常见于清洁、工具、个护、组装、功能测试。
+
+5. 日常 Vlog：产品自然放进生活流（晨间、家庭、通勤、运动、旅行、家务）。
+
+【卖点角度决策规则】
+selling_point_angle 必须基于全片主说服逻辑选择，通常所有分镜保持一致；只有某段明显切换到另一个购买理由时，才允许该段不同：
+- 专家背书：出现从业者/专业人士/资质/机构认证/检测报告/反向批评热门产品建立信任
+- 展示效果：实时演示/对照测试/前后时间线/个人蜕变/用户证言/数据证明
+- 轻松便捷：免决策/随时随地/零门槛/省时间/省步骤
+- 制造紧迫感：库存警告/限时折扣/渠道独占/社证加速
+- 天然安全：成分透明/敏感群体安全/安全恐吓/低负担安心
+- 价格优势：隐性成本曝光/替代价值/日均成本拆解/平替发现/直接比价/普通折扣价
+- 贩卖生活方式：圈层标识/理想自我投射/送礼叙事/场景代入/文化认同/审美升级
+
+注意：只有出现明确双对象/双方案对比，且包含替代价值表达时，formula_subtype 才选"平替对决型"，selling_point_angle 才关联"价格优势/平替发现"。单一品牌开箱中提到 sale/kids size/cheaper 只能作为"优惠活动/价格促销"分镜，不得覆盖全片主类或主卖点角度。
+
+【黄金3秒钩子规则】
+仅评估视频开头约 0-3 秒或最早分镜。没有明确命中时，golden_3s_hook/golden_3s_subtype/golden_3s_reason 三个字段全部输出空字符串""，禁止为填字段而强行归类。
+- 提问式：痛点提问/好奇提问/比价追问/成本提问/共鸣提问/从众提问/场景驱动型
+- 挑战式：悬念验证/潮流参与/极限测试/参与邀请/故事悬念/场景还原
+- 秘诀/技巧：避坑技巧/省钱秘笈/权威对抗/圈内信息/捷径承诺/稀缺框架/生活妙招
+- 震撼数据：逆认知数据/结果前置/大数锚定/百分比冲击/时间线震撼/对比冲击
+- 争议式：立场对抗/价格挑衅/情绪挑衅/槽点揭露/颠覆认知/冲突叙事/禁忌揭秘
+"""
+
+    anti_patterns = """
+【反例警示 - 以下情况极易误判，必须避免】
+1. 不要把服饰 haul（无拆包证据）判为开箱/ASMR。
+2. 不要把同一商品不同颜色/尺码左右分屏判为"前后分屏型"（前后分屏必须是同一对象、同一身体部位、同一空间的使用前vs使用后）。
+3. 不要把单一品牌开箱中的 sale/kids size/cheaper 判为"平替对决型"（平替必须有双品牌/竞品/贵价vs平价对照）。
+4. 不要把 GRWM 开头的夸张情绪宣言覆盖全片小类为"情感叙事型"（情绪只算黄金3秒或分镜标题处理）。
+5. 不要把汽车配件功能演示中的规格优势（如 sequential turn signals, IP68 waterproof, durable, portable）标为"功能演示"（镜头重点展示功能如何触发/操作/流程时标"功能演示"；口播明确说出可购买理由或规格优势时优先标"产品卖点"）。
+6. 不要把"我更喜欢这个颜色""去年买过另一个款""not with these shoes"标为"产品对比"（无明确同框/分屏/Which is better/价格功能对照时，属于产品卖点或真实体验）。
+7. 不要把"太短所以我不穿出门"这类个人试穿限制标为"适用场景"（应标产品卖点或真实体验）。
+8. 不要把普通"我来告诉你这个 sale"算为"省钱秘笈"（必须有隐藏路径/避坑经验/购买技巧/折扣入口/反常识省钱方法）。
+9. 禁止输出"多角度展示、转身展示、结束展示、服装试穿与展示、穿搭展示"等动作描述型或自造类型作为 title/content_tag；这些画面动作只写在 scene_description，分镜类型必须收敛为"情绪营销/优惠活动/产品卖点/真实体验/行动号召"等标准步骤。
+"""
+
+    field_conflict_rules = """
+【分镜切分与合并规则】
+切分优先级（从高到低）：
+1. 重大视觉场景切换：拍摄主体变化、镜头景别/机位变化、场景空间变化、新的关键视觉元素进入画面（手持手机展示价格页、文字贴纸、价格标签、分屏对比框）
+2. 叙事目的切换：核心转化目的变化（如从开场悬念→优惠机制→产品展示→试穿反馈→行动号召）
+3. 时间节奏：单个分镜通常 6-12 秒；视觉/口播语义/转化目的连续时可延长至 15-20 秒；超过 20 秒仍无清晰切点时，再按口播语义或动作节奏切分
+
+强制合并：
+- 同一商品同一场景同一转化目的下的连续角度、手部细节、过渡 B-roll
+- 服饰单品连续正面/侧面/背面展示、版型/洗水/剪裁/尺码/材质/弹性反馈
+- 同一商品不同颜色喜好、厚薄、图案、是否成套讨论
+
+强制切分示例：
+- 画面从"严重水垢的淋浴头特写" → 切换为"两个蒸汽清洁器并排摆放"：必须切分
+- 画面从"单一产品使用" → 切换为"手持手机展示 TikTok Shop 价格页面"：必须切分
+- 画面从"清洁动作特写" → 切换为"商店货架/产品包装盒全景"：必须切分
+- 画面中出现承载新转化目的的文字贴纸/价格标签/分屏对比框：必须切分
+
+【分镜边界语义规则】
+禁止因"口播叙事完整"或"同一转化目的"而将两个明显不同的视觉画面合并为同一分镜。
+禁止机械按字幕时间戳切断台词：不要把一句完整台词、因果句、转折句或从句拆到两个分镜，也不要让上一分镜 script 以未完成的连接语收尾。分镜时间边界可以围绕视觉切点前后微调，优先让每个 script 都是可独立理解的完整语义单元；如果视觉已经明显切换，则新分镜的 script 从下一句完整语义开始。
+
+【字段冲突处理 - content_tag 优先级】
+- 该段主要在讲便宜购买方法/优惠/折扣/deal/sale/coupon/price/save/link/shop/cart/购买路径/下单引导 → 优先标"优惠活动"或"价格促销"
+- 出现"X vs Y"/"Which is better"/竞品并列/两个产品同框比较/胜负结果/winner/价格功能对照 → 优先标"产品对比"
+- 多个购买理由强弱比较 → "卖点对比"
+- 清洁/使用结果差异（使用前vs使用后） → "效果对比"
+- 结尾出现 recommend/choose/go for/get yours/order/buy/入手/选择/推荐某品牌或产品，尤其同时出现 cheap/price/link/shop/购买路径 → 必须标"行动号召"（不要只标"产品功效"）
+- 汽车配件：镜头重点展示某个功能如何触发、如何操作、流程如何发生 → "功能演示"；口播/字幕明确说出一个可购买理由或规格优势（sequential turn signals, IP68 waterproof, welcome sequence, durable, portable, fast）→ 优先标"产品卖点"
+"""
+
     return f"""
-你是专业跨境短视频爆款模式分析师，严格输出JSON数组，不要任何多余解释。
+【角色与输出格式】
+你是专业跨境短视频爆款模式分析师。严格输出 JSON 数组，不要任何多余解释、markdown 代码块或总结文字。
 
-你的任务不是固定套用某一种模式，而是先判断视频属于哪一个大类与小类，再按该类型的高转化叙事链路拆分分镜。
+{structured_constraints}
 
-{visual_note}
-
-{granularity_note}
+{classification_decision_tree}
 
 {PATTERN_TAXONOMY}
 
 {MARKETING_TACTIC_TAXONOMY}
 
+{anti_patterns}
+
+{field_conflict_rules}
+
+{scene_description_rules}
+
 产品分类白名单：
 只能从以下固定类目中选择 product_classification；如果无法依据画面或口播判断，输出空字符串，不要创造新类目。
 {", ".join(PRODUCT_CLASSIFICATION_OPTIONS)}
 
-分类判断规则：
-1. 先判断视频主导表达方式，而不是单句台词。优先看：产品如何出场、是否真人亲测、是否开箱、是否分屏/前后对比、是否生活流叙事、是否第一人称沉浸演示。
-2. 如果同时命中多个类型，选择贯穿全片最多、承担转化最强的那个作为 viral_formula。
-3. formula_subtype 必须从该大类的小类中选择，不要创造新小类。
-4. 小类只用于判断视频形态，不代表固定步骤顺序；不要为了套小类而强行补不存在的段落。
-5. 分镜步骤从“全局叙事步骤词库”里选择，按视频真实出现顺序标注；一个视频可以只出现其中一部分步骤，也可以重复出现某类步骤。
-6. 分镜切分优先级（从高到低）：
-   第一优先：重大视觉场景切换。当画面出现以下会改变主体、场景或转化目的的变化时，应切分为新分镜；同一商品同一场景里的连续角度、手部细节、表情或过渡 B-roll 可以合并：
-   - 拍摄主体变化（如从"产品A特写"切换到"产品A+B同框"）
-   - 镜头景别/机位变化（如从特写切换到全景、从第一人称切换到桌面平拍）
-   - 场景空间变化（如从浴室切换到厨房）
-   - 新的关键视觉元素进入画面（如手持手机、价格标签、文字贴纸、分屏对比画面、新的人物或物体）
+{granularity_note}
 
-   第二优先：叙事目的切换。当核心转化目的发生变化时切分（如从开场悬念转到优惠机制、从优惠机制转到产品展示、从产品展示转到试穿反馈、从试穿反馈转到行动号召）。
-
-   第三优先：时间节奏。单个分镜通常控制在 6-12 秒；如果视觉、口播语义和转化目的都连续，可以延长到 15-20 秒左右。只有当超过 20 秒仍无清晰切点时，再按口播语义或动作节奏切分。
-
-   注意：禁止因"口播叙事完整"或"同一转化目的"而将两个明显不同的视觉画面合并为同一分镜。
-7. 对开箱 haul / 服装试穿类视频，优先参考这种阶段链路：故事开场/情绪营销 → 优惠活动或购买动机 → 产品卖点/产品信息 → 试穿或真实体验 → 行动号召。同一阶段里出现多个相近款式、颜色、尺码或重复评价时，应合并概括。重大视觉切换需要保留边界，但同一商品的连续正面/侧面/背面展示、手部细节补拍、快速 B-roll 不要仅因镜头变化就拆成多个分镜。
-8. 如果字幕里有西语、英语或其他语言，script 保留原语言；中文只写在分析字段里。
-9. 小类判定优先级：平替对决型必须有明确双对象/双方案对比，例如贵价品牌 vs 平替、竞品 A vs 竞品 B、常规方案 vs 替代方案、每份成本/价格差并列比较、dupe/alternative 对照；只有单一品牌开箱、haul、试穿或测评时，即使提到 sale、cheaper、kid sizes、优惠购买技巧，也不要判为平替对决型。
-10. 开箱主导结构优先归为开箱 / ASMR：如果视频从包裹/包装/袋子开始，持续出现打开、取出、展示、触摸材质、试穿或评价，主类应为“开箱 / ASMR”，小类通常为“开箱评测型”。价格促销只是分镜标签，不改变全片主类。
-10a. 服饰 TikTok Shop haul 不等于开箱：如果视频没有包裹/包装/拆开/取出等开箱证据，而是创作者已经穿在身上或镜前连续试穿多件服装、鞋、配饰，并讲版型、材质、尺码、搭配、舒适度或购买链接，应优先判为“GRWM + 产品 / 教学穿插型”。“haul”只是购物分享语境，不能单独作为开箱 / ASMR 依据。
-10b. 服饰 GRWM haul 的分镜标签要按商品段的转化目的收敛：颜色喜好、材质、厚薄、弹性、尺码、重量、是否成套、图案含义、conversation starter、是否适合穿出门等，通常是在给购买理由，应标“产品卖点”或“产品信息”。只有出现明确同框/分屏/Which is better/竞品/价格/功能对照时才标“产品对比”；不要仅因“我更喜欢这个颜色”“去年买过另一个款”“not with these shoes”标为产品对比。只有当核心是在表达惊喜、自信、治愈、身份认同等情绪价值，而不是讲具体商品理由时，才标“情绪营销”。“太短所以我不穿出门”这类个人试穿限制不是“适用场景”，应标“产品卖点”或“真实体验”。
-11. 同一品牌内的童码/成人码、不同尺码、不同颜色、sale 折扣、cheaper 购买技巧属于开箱 haul 或产品测评中的购买信息，不是“平替对决型”。只有出现两个品牌、两个产品、贵价 vs 平替、dupe/alternative 或明确竞品对照时，才允许判为平替对决型。
-12. 前后分屏型必须是同一对象、同一身体部位、同一空间或同一产品在“使用前 vs 使用后”“有产品 vs 无产品”“处理前 vs 处理后”的状态对比；同款服装不同颜色、不同尺码、不同姿态的左右分屏不是前后分屏型，应标为分屏对比 / 产品对比型，不能写成“使用前后”。
-13. selling_point_angle/selling_point_subtype 是全片主卖点角度，必须始终选择一个，通常所有分镜保持一致；如果某段明显切换到另一个购买理由，可以按该段真实内容调整。
-14. golden_3s_hook/golden_3s_subtype 只看视频开头约 0-3 秒或最早分镜，属于全片开场钩子；没有明确命中黄金3秒钩子时，golden_3s_hook、golden_3s_subtype、golden_3s_reason 都输出空字符串，不要为了填字段强行归类。
-15. opening_hook_summary/opening_hook_evidence/viral_reason_summary 是爆点解析字段，必须始终输出，尤其要补足固定黄金3秒分类覆盖不到的爆款开头。即使不命中固定黄金3秒分类，也要说明开头靠什么留人：价格冲击、痛点共鸣、身份代入、结果证据、视觉反差、情绪尴尬、生活场景、节奏剪辑或其他机制。
-
-短视频分镜补充规则：对 12-30 秒的镜前 GRWM POV / 服装试穿短视频，不要因为全片都在展示同一件衣服就合并成 1 个分镜；如果画面或字幕依次出现开场情绪/亮相、多角度转身展示、版型/洗水/剪裁/尺码/购买码/链接等不同转化目的，通常拆成 3-4 个分镜。典型结构是：0-3 秒情绪营销或故事开场 → 中段优惠活动/购买动机或多角度展示 → 后段产品卖点/真实体验/行动号召。镜前 GRWM POV 单品试穿优先判为“GRWM + 产品 / 仪式步骤型”，不要创造“穿搭展示型”等体系外小类。注意：30-60 秒视频按视觉切换通常拆成 3-5 个分镜；60-120 秒通常拆成 4-6 个；2-5 分钟长视频最多 6 个分镜。禁止为了凑数量而拆分视觉切换；多个相近商品、连续试穿反馈、连续 T 恤/配饰/颜色展示应按商品组或阶段合并。
-
-护肤/护发/美妆/洗护 GRWM 补充规则：如果主体内容是“使用频率/适用状态 → 操作步骤（按摩、涂抹、清洗、梳理等）→ 成分或功效 → 使用后体验/促销”，优先判为“GRWM + 产品 / 仪式步骤型”。开头的夸张情绪宣言、痛点表达或个人偏好只算情绪营销/黄金3秒钩子，不能覆盖全片小类。
-护发/防脱/洗护产品优先级规则：只要创作者在浴室、镜前或个人护理场景中亲自展示护发、洗护、美妆、护肤产品包装，并完成涂抹、清洗、起泡、梳理、按摩、使用后效果展示等流程，即使字幕写了 POV，也优先判为“GRWM + 产品 / 仪式步骤型”；不要因为 POV 文案判为“第一人称视角”，也不要因为有使用前后效果判为“分屏对比”。
-
-输出格式：
-[
-  {{
-    "start_time": 数字,
-    "end_time": 数字,
-    "title": "从全局叙事步骤词库中选择的该分镜叙事角色",
-    "scene_description": "画面描述",
-    "script": "台词",
-    "product_category": "画面中真实出现的商品品类，例如服装/护肤/清洁/工具/食品等",
-    "product_classification": "从产品分类白名单中选择一个类目；无法判断则为空字符串",
-    "evidence_frame": "证据关键帧编号，例如F03",
-    "evidence_timestamp": 数字,
-    "shot_type": "特写/镜前特写/分屏/对比/第一人称/全景",
-    "content_tag": "从全局叙事步骤词库中选择，必须贴合该段真实内容",
-    "viral_formula": "第一人称视角/开箱 / ASMR/GRWM + 产品/分屏对比/日常 Vlog",
-    "formula_subtype": "对应大类下的小类",
-    "category_reason": "为什么判定为这个大类和小类，简洁说明",
-    "selling_point_angle": "专家背书/展示效果/轻松便捷/制造紧迫感/天然安全/价格优势/贩卖生活方式",
-    "selling_point_subtype": "对应卖点角度下的小类",
-    "selling_point_reason": "为什么判定为这个卖点角度，结合画面或口播证据",
-    "golden_3s_hook": "提问式/挑战式/秘诀/技巧/震撼数据/争议式；没有明确命中则为空字符串",
-    "golden_3s_subtype": "对应黄金3秒钩子下的小类；没有明确命中则为空字符串",
-    "golden_3s_reason": "为什么判定为这个开头钩子，只引用开头0-3秒或最早分镜证据；没有明确命中则为空字符串",
-    "opening_hook_summary": "即使不命中固定黄金3秒分类，也要总结开头为什么能留住人",
-    "opening_hook_evidence": "引用开头台词、字幕或画面证据；命中黄金3秒的原台词/字幕要写在这里，便于前端高亮",
-    "viral_reason_summary": "总结这个视频为什么会爆，分点概括价格锚点、证据链、共鸣钩子、拍摄手法或转化路径",
-    "visual_tactic": "该段使用的视觉手法，例如手持POV/开箱特写/镜前真人实测/左右分屏/生活流植入",
-    "conversion_point": "这一段承担的转化作用"
-  }}
-]
-
-要求：
-- 只输出JSON数组，严禁markdown代码块。
-- 如果存在真实口播或真实销售字幕，script 保留原语言原文，不要编造原文没有的句子；如果只有背景音乐歌词、无关音频或纯画面展示，script 写“无有效口播/字幕”，不要在 script 中复述画面描述。
-- product_category 必须依据关键帧画面判断，不能依据无关音频歌词猜测。
-- product_classification 必须严格从产品分类白名单中选择，且优先依据产品画面和商品语义；不确定时输出空字符串。
-- evidence_frame/evidence_timestamp 必须对应你用于描述该分镜的关键帧；颜色、款式、商品只允许来自这个证据帧附近。
-- 对服饰视频，不要在没有证据时写具体颜色；如果写颜色，必须是 evidence_frame 中清楚可见的颜色。
-- scene_description 至少 30 个中文字符，要同时写清楚人物动作、商品状态/款式、镜头关系，以及这一段在爆款叙事中的作用；不要只写“展示产品”“创作者介绍商品”这种泛描述。
-- script 需要覆盖该段完整口播/字幕语义。若同一时间段有多句口播，请合并保留关键原文；如果该段没有有效口播或字幕，固定写“无有效口播/字幕”，画面动作只写在 scene_description。
-- 分镜边界不得机械按字幕时间戳切断台词：不要把一句完整台词、因果句、转折句或从句拆到两个分镜里，也不要让上一分镜 script 以未完成的连接语、铺垫语或半句话收尾。分镜时间边界可以围绕视觉切点前后微调，优先让每个 script 都是可独立理解的完整语义单元；如果视觉已经明显切换，则新分镜的 script 从下一句完整语义开始。
-- 每个分镜的 conversion_point 必须具体到“为什么让用户更想买/更信任/更省钱/更理解差异”，不要写空泛的“促进转化”。
-- selling_point_angle 和 selling_point_subtype 必须严格从“卖点角度分类体系”选择；selling_point_reason 要说明它解决的是信任、效果、省事、紧迫、安全、省钱还是生活方式想象。
-- golden_3s_hook 和 golden_3s_subtype 只有在开头存在明确钩子时才从“黄金3秒钩子分类体系”选择；如果只是普通场景铺垫、产品自然出现、平铺直叙或无法判断，三个 golden_3s_* 字段都留空。golden_3s_reason 只能依据开头约 0-3 秒或最早分镜，不能引用后半段内容。
-- opening_hook_summary/opening_hook_evidence/viral_reason_summary 不能留空。它们不是固定分类字段，而是爆点解析字段：即使不命中固定黄金3秒分类，也要解释开头靠什么让人继续看；如果开头有强台词、字幕、价格数字、对比问题或情绪冲突，必须在 opening_hook_evidence 中原样摘出关键短句用于高亮。
-- viral_reason_summary 用中文分点总结这个视频为什么会爆，至少覆盖 2 个维度，例如价格锚点、视觉证据、痛点共鸣、信任补强、拍摄手法、CTA 转化路径；不要只写“内容吸引人”。
-- content_tag 以该段核心转化作用为准。如果该段主要在讲便宜购买方法、优惠、折扣、deal、sale、coupon、price、save、link、shop、cart、购买路径或下单引导，优先标为“优惠活动”或“价格促销”；如果价格/链接只是产品展示或试穿反馈里的附带一句，不要覆盖该段原本的“产品卖点/真实体验”。但如果该段同时存在明显视觉切换（如手持手机展示价格页面、商店货架特写），优先按视觉边界拆分为独立分镜，再分别标注 content_tag。
-- 如果画面或字幕出现“X vs Y”、“Which is better?”、“哪个更好”、竞品并列、两个产品同框比较、胜负结果、winner、价格/成分/功能对照，这类段落优先标为“产品对比”；如果重点是多个购买理由强弱，再标为“卖点对比”；如果重点是清洁/使用结果差异，再标为“效果对比”。不要标为“产品信息”或“产品亮相”。
-- 对比类视频的开头即使只是展示两个产品，只要同时出现 vs/which is better/对比问题，也应视为“产品对比”，因为它承担的是建立对比对象和选择悬念。
-- 对比类美妆/护肤视频的 title/content_tag 要按该段真实场景、口播语义和转化目的综合判断，不要只根据单个词或单个动作决定。开头建立比较需求或使用困扰时可标“用户痛点”；中段若涂抹、推开、展示质地是为了证明购买理由，可标“产品卖点”“产品功效”或“效果对比”；结尾只有在明确承担购买引导、推荐选择或下单路径时才标“行动号召”，否则保留“真实体验”“使用感受”或“产品卖点”等更贴切标签。
-- 结尾推荐式 CTA 也属于“行动号召”：例如 recommend/choose/go for/get yours/order/buy/入手/选择/推荐某品牌或产品，尤其同时出现 cheap/price/link/shop/购买路径、快速到手、优惠等购买理由时，不要只标为“产品功效”。
-- 汽车配件、工具、电子产品等功能型商品中，`功能演示` 和 `产品卖点` 的区别是：如果镜头重点是展示某个功能如何触发、如何操作、流程如何发生，标“功能演示”；如果口播/字幕明确说出一个可购买理由或规格优势，例如 sequential turn signals、IP68 waterproof、welcome sequence、durable、portable、fast 等，即使画面同时在演示，也优先标“产品卖点”。同一卖点的连续动态展示不要仅因动作变化拆成多个“功能演示”。
-- 只有出现明确双对象/双方案对比，且包含 cheaper、cheap、dupe、alternative、save money、price、per serving、cost、same look、same quality、平替/贵价/大牌/竞品等替代价值表达时，formula_subtype 才优先选择“平替对决型”。单一品牌开箱中提到 sale、kids size、cheaper 只能作为“优惠活动/价格促销”分镜，不得覆盖“开箱 / ASMR”的主类判断。
-- scene_description用中文写，结合画面动作和对应类型套路解释。
-- 时间必须覆盖字幕中的关键内容，尽量与语义段落对齐。
-- 分镜数量要克制：如果多个连续片段都在围绕同一产品、同一优惠机制、同一试穿反馈或同一行动号召展开，请合并为一个分镜，在 script 字段中保留该阶段的关键原文。
-- 所有分镜的 viral_formula 和 formula_subtype 应保持一致，除非视频明显是混合结构；混合时也要以主类型为准。
-- 不要把某个小类的示例流程当作硬性模板；title/content_tag 必须来自视频真实内容。
-- title 和 content_tag 只能从“全局叙事步骤词库”中选择，严禁输出“多角度展示、转身展示、结束展示、服装试穿与展示、穿搭展示”等动作描述型或自造类型；这些画面动作应写进 scene_description，分镜类型要归一为“情绪营销/优惠活动/产品卖点/真实体验/行动号召”等标准步骤。
-
-### 视觉切分强制触发示例
-以下重大画面变化出现时，即使口播仍在继续，也应拆分为独立分镜；同一商品同一场景中的连续角度、表情、手部细节和过渡 B-roll 可以并入同一分镜：
-- 画面从"严重水垢的淋浴头特写" → 切换为"两个蒸汽清洁器并排摆放"：应切分
-- 画面从"单一产品使用" → 切换为"手持手机展示 TikTok Shop 价格页面"：应切分
-- 画面从"清洁动作特写" → 切换为"商店货架/产品包装盒全景"：应切分
-- 画面中出现承载新转化目的的文字贴纸/价格标签/分屏对比框：应切分
+{visual_note}
 
 字幕内容：
 {transcript}
@@ -1892,7 +2023,58 @@ def summarize_source_shots(record):
             ])
         )
     return "\n\n".join(lines) or "源视频未生成有效分镜。"
+import re
 
+# 定义禁止出现在 scene_description 中的目的性前缀/句式
+SCENE_DESCRIPTION_PURPOSE_PATTERNS = [
+    r"旨在.+?。",
+    r"为了.+?。",
+    r"以.*?方式，.*?。",
+    r"建立观众对.+?的期待。?",
+    r"强化其.+?的卖点。?",
+    r"展示产品.+?的核心用法。?",
+    r"证明.+?。",
+    r"突出.+?的优势。?",
+    r"通过.*?，.*?。",
+    r"让观众.*?。",
+]
+
+# 定义需要提醒模型保留原文的画面文字常见误译
+COMMON_SCREEN_TEXT_MISTRANSLATIONS = {
+    "懒人全妆": "Lazy girl full glam",
+    # 后续可扩展
+}
+
+def clean_scene_description(item: dict) -> dict:
+    """
+    轻量清洗 scene_description，只删目的性分析句，不补充内容。
+    如果检测到画面文字被翻译，尝试还原（仅对已知高频误译）。
+    """
+    desc = str(item.get("scene_description", ""))
+    original_desc = desc
+    
+    # 1. 删除明显的目的性分析句
+    for pattern in SCENE_DESCRIPTION_PURPOSE_PATTERNS:
+        desc = re.sub(pattern, "", desc)
+    
+    # 2. 如果检测到已知误译，且 script 里没有原文，尝试在 scene_description 中还原
+    # 注意：这里只是兜底，主要靠 Prompt 约束
+    for wrong, correct in COMMON_SCREEN_TEXT_MISTRANSLATIONS.items():
+        if wrong in desc and correct.lower() not in desc.lower():
+            # 如果 script 里有原文，不处理；如果 script 也没有，尝试还原
+            script_text = str(item.get("script", ""))
+            if correct.lower() not in script_text.lower():
+                desc = desc.replace(wrong, correct)
+    
+    # 3. 清理多余空格和句号
+    desc = re.sub(r"\s+", " ", desc).strip()
+    desc = re.sub(r"。+", "。", desc)
+    
+    if desc != original_desc:
+        item["scene_description"] = desc
+        item["_scene_description_cleaned"] = True  # 标记被清洗过，便于后续审计
+    
+    return item
 
 def detect_source_script_language(record):
     scripts = []
@@ -2503,65 +2685,6 @@ def generate_script_copy(source_record, product_input, model, product_visual_fra
     return result
 
 
-def normalize_content_tag(item):
-    text = " ".join([
-        str(item.get("title", "")),
-        str(item.get("content_tag", "")),
-        str(item.get("scene_description", "")),
-        str(item.get("script", "")),
-        str(item.get("conversion_point", "")),
-    ]).lower()
-
-    cta_keywords = [
-        "go for", "choose", "pick up", "grab", "get yours", "get it", "order", "buy now",
-        "shop now", "click the link", "link in bio", "add to cart", "check out",
-        "选择", "选它", "买它", "入手", "下单", "点击链接", "购物车", "主页",
-    ]
-    recommendation_keywords = [
-        "recommend", "would definitely recommend", "值得推荐", "推荐", "最好的", "the best",
-    ]
-    purchase_context_keywords = [
-        "cheap", "cheaper", "quickly", "price", "buy", "purchase", "shop", "cart", "link",
-        "便宜", "省钱", "优惠", "价格", "购买", "买", "下单", "链接",
-    ]
-    if _keyword_hits(text, cta_keywords) and (
-        _keyword_hits(text, recommendation_keywords) or _keyword_hits(text, purchase_context_keywords)
-    ):
-        item["title"] = "行动号召"
-        item["content_tag"] = "行动号召"
-        if not item.get("conversion_point"):
-            item["conversion_point"] = "通过明确推荐选择或购买该产品推动转化"
-        return item
-
-    # 如果模型已经输出了有效的 content_tag，优先保留，不做强制覆盖
-    current_tag = str(item.get("content_tag", "")).strip()
-    if current_tag in ALLOWED_STORY_STEPS:
-        return item
-
-    promo_keywords = [
-        "便宜", "省钱", "优惠", "折扣", "促销", "活动", "价格", "购买", "买", "下单", "链接",
-        "coupon", "discount", "deal", "sale", "cheap", "cheaper", "save", "price", "buy", "purchase",
-        "link", "shop", "cart", "tiktok shop",
-    ]
-    if any(keyword in text for keyword in promo_keywords):
-        item["content_tag"] = "优惠活动"
-        if not item.get("conversion_point"):
-            item["conversion_point"] = "通过价格、优惠或购买路径降低决策门槛"
-        return item
-
-    contrast_keywords = [
-        " vs ", "vs.", "对比", "哪个更好", "哪一个更好", "更好", "差异", "区别", "比较", "胜出", "winner",
-        "which is better", "compare", "comparison", "versus", "better than", "difference",
-    ]
-    if any(keyword in text for keyword in contrast_keywords):
-        item["content_tag"] = "产品对比"
-        if not item.get("conversion_point"):
-            item["conversion_point"] = "通过并列比较建立产品选择理由"
-        return item
-
-    return item
-
-
 ALLOWED_STORY_STEPS = {
     "故事开场",
     "用户痛点",
@@ -2590,30 +2713,6 @@ ALLOWED_STORY_STEPS = {
 }
 
 
-def infer_standard_story_step(item):
-    text = " ".join([
-        str(item.get("title", "")),
-        str(item.get("content_tag", "")),
-        str(item.get("scene_description", "")),
-        str(item.get("script", "")),
-        str(item.get("conversion_point", "")),
-    ]).lower()
-
-    if _keyword_hits(text, ["coupon", "discount", "deal", "sale", "price", "code", "link", "shop", "cart", "购买", "链接", "优惠", "折扣", "促销", "价格"]):
-        return "优惠活动"
-    if _keyword_hits(text, ["vs", "which is better", "compare", "comparison", "winner", "对比", "哪个更好"]):
-        return "产品对比"
-    if _keyword_hits(text, ["差异", "区别", "不同", "旧方法", "普通产品", "常规方案"]):
-        return "产品差异"
-    if _keyword_hits(text, ["wash", "cut", "fit", "sizing", "size", "denim", "版型", "剪裁", "洗水", "尺码", "腰部", "臀部", "显瘦", "包裹"]):
-        return "产品卖点"
-    if _keyword_hits(text, ["turn", "side", "back", "try on", "mirror", "转身", "侧面", "背面", "试穿", "上身", "多角度"]):
-        return "真实体验"
-    if _keyword_hits(text, ["smile", "excited", "happy", "情绪", "微笑", "开心", "自信", "满意"]):
-        return "情绪营销"
-    return "产品亮相"
-
-
 def normalize_story_step_labels(item):
     title = str(item.get("title", "")).strip()
     content_tag = str(item.get("content_tag", "")).strip()
@@ -2628,129 +2727,8 @@ def normalize_story_step_labels(item):
     return item
 
 
-def normalize_vehicle_accessory_story_step(item):
-    product_category = str(item.get("product_category", "")).lower()
-    if not _keyword_hits(product_category, ["汽车", "车", "vehicle", "car", "truck", "auto"]):
-        return item
-
-    text = " ".join([
-        str(item.get("title", "")),
-        str(item.get("content_tag", "")),
-        str(item.get("scene_description", "")),
-        str(item.get("script", "")),
-        str(item.get("conversion_point", "")),
-    ]).lower()
-
-    if str(item.get("title", "")).strip() == "功能演示" or str(item.get("content_tag", "")).strip() == "功能演示":
-        if _keyword_hits(text, [
-            "sequential", "turn signal", "turn signals", "welcome sequence", "waterproof", "ip68",
-            "rain or shine", "流水", "转向灯", "欢迎序列", "防水", "雨天", "耐用",
-        ]):
-            item["title"] = "产品卖点"
-            item["content_tag"] = "产品卖点"
-
-    return item
-
-
 def _keyword_hits(text, keywords):
     return [keyword for keyword in keywords if keyword in text]
-
-
-def infer_selling_point_taxonomy(text):
-    text = (text or "").lower()
-    rules = [
-        (
-            "专家背书",
-            [
-                ("从业者内幕", ["as a doctor", "as a trainer", "industry", "insider", "从业", "业内", "行业", "私下用"]),
-                ("专业背书", ["doctor", "dermatologist", "expert", "trainer", "nutritionist", "医生", "专家", "营养师", "教练", "技师"]),
-                ("机构认证", ["certified", "lab", "clinical", "patent", "tested", "approved", "认证", "实验室", "临床", "专利", "检测报告", "批准"]),
-                ("反向信任", ["overhyped", "don't trust", "not worth", "别信", "吐槽", "热门产品", "智商税", "夸大"]),
-            ],
-            "通过背书信息降低信任门槛。",
-        ),
-        (
-            "展示效果",
-            [
-                ("实时演示", ["capture", "remove", "clean", "works", "watch", "demo", "演示", "实时", "吸附", "清洁", "去除", "立刻", "马上", "现场"]),
-                ("对照测试", ["vs", "compare", "comparison", "test against", "对照", "竞品", "对比测试", "同时测试"]),
-                ("前后时间线", ["before and after", "before/after", "使用前后", "前后对比", "day 1", "7 days", "时间线"]),
-                ("个人蜕变故事", ["changed my life", "transformation", "my journey", "改变了我", "蜕变", "变化过程"]),
-                ("用户证言集", ["review", "reviews", "comment", "comments", "rating", "testimonial", "评价", "评论区", "评分", "证言"]),
-                ("数据证明", ["data", "clinical", "lab", "%", "hours", "数据", "实验", "续航", "提升", "降低"]),
-            ],
-            "核心说服力来自画面或口播对效果的直接证明。",
-        ),
-        (
-            "轻松便捷",
-            [
-                ("免决策", ["only one", "best choice", "no brainer", "不用纠结", "闭眼入", "唯一选择", "免决策"]),
-                ("随时随地", ["portable", "travel", "pocket", "bag", "carry", "on the go", "便携", "旅行", "通勤", "随身", "车载"]),
-                ("零门槛", ["beginner", "simple", "install", "anyone", "新手", "简单", "好上手", "安装", "零门槛"]),
-                ("省时间", ["quick", "fast", "seconds", "minutes", "省时", "快速", "几秒", "几分钟"]),
-                ("省步骤", ["one step", "lazy", "without", "no need", "一键", "一步", "懒人", "不用", "无需", "省步骤"]),
-            ],
-            "购买理由集中在降低使用成本和操作门槛。",
-        ),
-        (
-            "制造紧迫感",
-            [
-                ("库存警告", ["sold out", "stock", "restock", "库存", "补货", "抢", "快没了", "售罄"]),
-                ("限时折扣", ["limited-time", "limited time", "today only", "expires", "ends tonight", "last chance", "coupon", "deal ends", "限时", "截止", "倒计时", "今天结束", "最后机会", "优惠券"]),
-                ("渠道独占", ["only on", "exclusive", "tiktok shop only", "独家", "渠道", "直播间", "当前链接"]),
-                ("社证加速", ["viral", "everyone is buying", "bestseller", "爆单", "都在买", "榜单", "跟风"]),
-            ],
-            "通过时间、库存或节点压力推动立即行动。",
-        ),
-        (
-            "天然安全",
-            [
-                ("成分透明", ["natural", "organic", "plant", "clean ingredients", "天然", "有机", "植物", "无添加", "成分", "不含"]),
-                ("敏感群体安全", ["kids", "baby", "pet safe", "family", "pregnant", "儿童", "宝宝", "宠物", "全家", "孕妇", "敏感肌"]),
-                ("安全恐吓", ["toxic", "harmful", "hidden danger", "有毒", "危险", "隐藏风险", "伤害"]),
-                ("低负担安心", ["non-toxic", "nontoxic", "sensitive", "no alcohol", "低卡", "低糖", "无毒", "低刺激", "食品级", "环保"]),
-            ],
-            "主卖点在于降低安全风险和使用顾虑。",
-        ),
-        (
-            "价格优势",
-            [
-                ("隐性成本曝光", ["waste money", "wasted", "hidden cost", "浪费钱", "隐性成本", "无效替代", "花冤枉钱"]),
-                ("替代价值", ["replace", "instead of", "all in one", "替代多个", "一支搞定", "省下", "总节省"]),
-                ("日均成本拆解", ["per serving", "per use", "per day", "cost breakdown", "每份", "每次", "每天", "单价", "成本"]),
-                ("平替发现", ["dupe", "alternative", "same look", "same quality", "平替", "替代", "同款", "贵价", "发现"]),
-                ("直接比价", ["cheap", "cheaper", "sale", "price", "full price", "on sale", "never on sale", "look at the price", "under $", "便宜", "低价", "比价", "价格标签", "原价", "全价", "打折", "划算"]),
-            ],
-            "通过价格、成本或折扣降低购买阻力。",
-        ),
-        (
-            "贩卖生活方式",
-            [
-                ("圈层标识", ["for moms", "pet owners", "gym girls", "clean girl", "圈层", "人群", "妈妈", "宠物家庭", "健身人群"]),
-                ("理想自我投射", ["confidence", "become", "dream", "自信", "理想", "想成为", "更好的自己"]),
-                ("送礼叙事", ["gift", "present", "holiday gift", "礼物", "送礼", "节日", "伴侣"]),
-                ("场景代入", ["summer vibes", "vacation", "patio", "party", "bedroom", "庭院", "派对", "卧室", "通勤", "度假"]),
-                ("文化认同", ["aesthetic", "trend", "viral", "tiktok made me buy", "亚文化", "流行", "趋势", "同款"]),
-                ("审美升级", ["outfit", "style", "fashion", "cozy", "comfy", "审美", "穿搭", "风格", "精致", "质感", "舒服"]),
-            ],
-            "视频把商品包装成一种可向往、可代入的生活状态。",
-        ),
-    ]
-
-    for angle, subrules, reason in rules:
-        for subtype, keywords in subrules:
-            if _keyword_hits(text, keywords):
-                return {
-                    "selling_point_angle": angle,
-                    "selling_point_subtype": subtype,
-                    "selling_point_reason": reason,
-                }
-
-    return {
-        "selling_point_angle": "展示效果",
-        "selling_point_subtype": "结果场景呈现",
-        "selling_point_reason": "默认按画面呈现的产品结果和使用收益归类。",
-    }
 
 
 def _opening_story_text(items):
@@ -2781,126 +2759,6 @@ def _opening_story_text(items):
             str(item.get("visual_tactic", "")),
         ])
     return " ".join(parts).lower()
-
-
-def infer_golden_3s_taxonomy(text):
-    text = (text or "").lower()
-    question_keywords = [
-        "?", "？", "got ", "do you", "are you", "which is better", "listen if",
-        "why is everyone", "how much", "你", "吗", "为什么", "有没有", "哪个", "多少钱",
-    ]
-    pain_keywords = ["pain", "problem", "dirty", "dust", "hair", "毛", "脏", "痛点", "困扰", "麻烦", "失败", "焦虑"]
-    if _keyword_hits(text, question_keywords):
-        if _keyword_hits(text, ["which is better", "哪个", "哪一个"]):
-            subtype = "比价追问"
-        elif _keyword_hits(text, ["how much", "cost", "price", "spend", "多少钱", "花费", "成本"]):
-            subtype = "成本提问"
-        elif _keyword_hits(text, pain_keywords):
-            subtype = "痛点提问"
-        elif _keyword_hits(text, ["why is everyone", "everyone", "all over", "所有人", "都在", "为什么大家"]):
-            subtype = "从众提问"
-        elif _keyword_hits(text, ["listen if", "for ", "if your", "如果你", "适合", "人群", "pet", "summer", "bathroom", "kitchen", "通勤", "健身", "浴室", "厨房"]):
-            subtype = "场景驱动型"
-        else:
-            subtype = "好奇提问"
-        return {
-            "golden_3s_hook": "提问式",
-            "golden_3s_subtype": subtype,
-            "golden_3s_reason": "开头通过提问制造参与感或信息缺口，促使目标观众继续看。",
-        }
-
-    if _keyword_hits(text, ["battle", "boring", "until this", "no one likes", "nobody likes", "don't like", "hate", "unpopular opinion", "i said what i said", "dupe", "alternative", "don't buy", "stop buying", "wrong", "没人喜欢", "不喜欢", "无聊", "直到这个", "别买", "真香", "争议", "平替", "槽点", "颠覆"]):
-        if _keyword_hits(text, ["dupe", "alternative", "平替"]):
-            subtype = "价格挑衅"
-        elif _keyword_hits(text, ["angry", "annoyed", "mad", "沮丧", "愤怒", "恼火", "吐槽"]):
-            subtype = "情绪挑衅"
-        elif _keyword_hits(text, ["wrong", "myth", "颠覆", "误区", "用错"]):
-            subtype = "颠覆认知"
-        elif _keyword_hits(text, ["boring", "until this", "don't buy", "stop buying", "no one likes", "nobody likes", "don't like", "hate", "没人喜欢", "不喜欢", "无聊", "直到这个", "别买", "缺陷", "槽点"]):
-            subtype = "槽点揭露"
-        else:
-            subtype = "立场对抗"
-        return {
-            "golden_3s_hook": "争议式",
-            "golden_3s_subtype": subtype,
-            "golden_3s_reason": "开头通过强观点、对立选择或争议表达激发讨论。",
-        }
-
-    if _keyword_hits(text, ["mistake", "mistakes", "hack", "tip", "trick", "secret", "how to", "learn from", "nobody tells", "insider", "早知道", "技巧", "秘诀", "避坑", "踩坑", "没人告诉"]):
-        subtype = "避坑技巧" if _keyword_hits(text, ["mistake", "mistakes", "learn from", "避坑", "踩坑", "早知道"]) else "使用技巧"
-        if _keyword_hits(text, ["cheap", "cheaper", "save", "sale", "discount", "省钱", "便宜", "折扣"]):
-            subtype = "省钱秘笈"
-        elif _keyword_hits(text, ["insider", "industry", "圈内", "业内"]):
-            subtype = "圈内信息"
-        elif _keyword_hits(text, ["nobody tells", "secret", "few people", "没人告诉", "少数人", "别让太多人"]):
-            subtype = "稀缺框架"
-        elif _keyword_hits(text, ["shortcut", "faster", "hack", "捷径", "更快", "省步骤"]):
-            subtype = "捷径承诺"
-        return {
-            "golden_3s_hook": "秘诀/技巧",
-            "golden_3s_subtype": subtype,
-            "golden_3s_reason": "开头承诺提供技巧、经验或避坑信息，制造实用价值期待。",
-        }
-
-    if _keyword_hits(text, ["does it work", "challenge", "test", "try this", "guess", "watch me", "story time", "挑战", "测试", "猜", "看看", "故事"]):
-        if _keyword_hits(text, ["does it work", "really work", "真的有用", "试试看"]):
-            subtype = "悬念验证"
-        elif _keyword_hits(text, ["extreme", "stress test", "耐久", "极限", "荒谬"]):
-            subtype = "极限测试"
-        elif _keyword_hits(text, ["guess", "comment", "猜", "评论"]):
-            subtype = "参与邀请"
-        elif _keyword_hits(text, ["story", "crisis", "故事", "危机", "转折"]):
-            subtype = "故事悬念"
-        else:
-            subtype = "场景还原"
-        return {
-            "golden_3s_hook": "挑战式",
-            "golden_3s_subtype": subtype,
-            "golden_3s_reason": "开头用挑战、警示或反常识表达拉高观看张力。",
-        }
-
-    if re.search(r"(\d+%|\$\s?\d+|\d+\s?(秒|分钟|天|倍|k|m))", text):
-        subtype = "大数锚定" if _keyword_hits(text, ["k", "m", "sold", "views", "comments", "销量", "播放", "评论"]) else "结果前置"
-        if "$" in text or _keyword_hits(text, ["省", "钱", "cost", "price"]):
-            subtype = "对比冲击"
-        if "%" in text or _keyword_hits(text, ["percent", "百分比"]):
-            subtype = "百分比冲击"
-        if _keyword_hits(text, ["秒", "分钟", "天", "second", "minute", "day"]):
-            subtype = "时间线震撼"
-        return {
-            "golden_3s_hook": "震撼数据",
-            "golden_3s_subtype": subtype,
-            "golden_3s_reason": "开头用数字降低理解成本，并制造结果或差异冲击。",
-        }
-
-    return {
-        "golden_3s_hook": "",
-        "golden_3s_subtype": "",
-        "golden_3s_reason": "",
-    }
-
-
-def normalize_marketing_taxonomies(items):
-    combined_text = _combined_story_text(items)
-    opening_text = _opening_story_text(items)
-    selling = infer_selling_point_taxonomy(combined_text)
-    golden_3s = infer_golden_3s_taxonomy(opening_text)
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        current_angle = item.get("selling_point_angle", "")
-        should_override_selling = (
-            not current_angle
-            or (current_angle == "制造紧迫感" and selling.get("selling_point_angle") == "价格优势")
-        )
-        if should_override_selling:
-            for key, value in selling.items():
-                item[key] = value
-
-        for key, value in golden_3s.items():
-            item[key] = value
-    return items
 
 
 def _combined_story_text(items):
@@ -2938,437 +2796,7 @@ def _has_alternative_value_in_comparison_context(items, alternative_value_keywor
             return True
     return False
 
-
-def should_reclassify_as_alternative_showdown(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    alternative_value_keywords = [
-        "平替", "替代品", "大牌", "贵价", "高价", "价格", "单价", "每份", "成本", "低价",
-        "$", "price", "cost", "per serving", "dupe", "cheaper", "cheap", "affordable",
-        "expensive", "save money", "save", "same look", "same quality",
-    ]
-    explicit_replacement_keywords = [
-        "alternative", "instead of", "rather than", "替代方案", "常规方案",
-    ]
-    competitor_product_keywords = [
-        "bissell", "redhut", "red-hut", "steam shot",
-    ]
-    comparison_keywords = [
-        " vs ", "vs.", "versus", "which is better", "哪个更好", "哪一个更好", "对比",
-        "比较", "差异", "区别", "compare", "comparison", "better than", "instead of",
-        "rather than", "winner", "胜出", "compared", "next to",
-    ]
-
-    has_replacement = bool(_keyword_hits(text, explicit_replacement_keywords))
-    has_competitor_product = bool(_keyword_hits(text, competitor_product_keywords))
-    has_comparison = bool(_keyword_hits(text, comparison_keywords))
-    has_contextual_alternative_value = _has_alternative_value_in_comparison_context(
-        items,
-        alternative_value_keywords,
-        comparison_keywords,
-    )
-
-    if has_comparison and (has_contextual_alternative_value or (has_replacement and has_competitor_product)):
-        return True
-
-    return False
-
-
-def should_classify_as_method_comparison(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    split_or_same_subject = _keyword_hits(text, [
-        "分屏", "左右", "两侧", "半边脸", "同一张脸", "同一面部", "face split", "split screen",
-        "side", "one side", "other side", "tinted sunscreen", "invisible sunscreen",
-    ])
-    method_or_process = _keyword_hits(text, [
-        "涂抹", "推开", "点涂", "融入", "抹开", "apply", "melt", "melts", "blend", "blends",
-        "wear", "sunscreen", "防晒", "透明防晒", "有色防晒",
-    ])
-    same_problem = _keyword_hits(text, [
-        "防晒", "sunscreen", "肤色", "skin tone", "skin", "uv", "spf",
-    ])
-    alternative_or_cost = _keyword_hits(text, [
-        "平替", "dupe", "cheaper", "cheap", "cost", "per serving", "save money",
-        "贵价", "大牌", "省钱", "成本",
-    ])
-
-    return bool(split_or_same_subject and method_or_process and same_problem and not alternative_or_cost)
-
-
-def normalize_as_method_comparison(items):
-    reason = "画面围绕同一防晒需求，在同一面部左右区域按步骤涂抹并比较两种防晒方案的呈现效果；核心是解决同一问题的不同方法并排对比，不是价格/平替价值对决。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "分屏对比"
-        item["formula_subtype"] = "方法对比型"
-        item["category_reason"] = reason
-        normalize_method_comparison_story_step(item)
-    return items
-
-
-def normalize_method_comparison_story_step(item):
-    text = " ".join([
-        str(item.get("title", "")),
-        str(item.get("content_tag", "")),
-        str(item.get("scene_description", "")),
-        str(item.get("script", "")),
-        str(item.get("conversion_point", "")),
-    ]).lower()
-    is_applicable_people = (
-        str(item.get("title", "")).strip() == "适用人群"
-        or str(item.get("content_tag", "")).strip() == "适用人群"
-    )
-    sunscreen_method_context = _keyword_hits(text, [
-        "sunscreen", "防晒", "tinted", "invisible", "makeup", "blurring", "filter",
-        "skin tone", "shade", "妆前", "妆感", "肤色", "有色", "透明", "隐形",
-    ])
-    explicit_people_context = _keyword_hits(text, [
-        "妈妈", "上班族", "健身人群", "懒人", "旅行者", "宠物家庭", "儿童", "孕妇",
-        "敏感肌", "for moms", "pet owners", "gym", "travelers", "kids", "pregnant",
-    ])
-    if is_applicable_people and sunscreen_method_context and not explicit_people_context:
-        item["title"] = "产品卖点"
-        item["content_tag"] = "产品卖点"
-        item["conversion_point"] = (
-            "把两款防晒的妆感、可否叠加化妆和日常使用顾虑讲清楚，帮助观众按使用方式选择，"
-            "不是按固定人群标签对号入座。"
-        )
-    return item
-
-
-def should_classify_as_unboxing_review(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    unboxing_keywords = [
-        "开箱", "拆箱", "拆包", "拆开", "打开", "包裹", "包装", "袋子", "取出", "拿出",
-        "package", "packaging", "open it", "open this", "let's open", "unbox", "unboxing",
-        "bag",
-    ]
-    review_keywords = [
-        "试穿", "尺寸", "尺码", "材质", "柔软", "质感", "评价", "测评", "真实体验",
-        "使用感受", "产品信息", "产品特写", "fit", "size", "soft", "obsessed", "try on",
-        "hoodie", "pants", "sale",
-    ]
-    direct_showdown_keywords = [
-        " vs ", "vs.", "versus", "which is better", "winner", "compare", "comparison",
-        "dupe", "alternative", "竞品", "贵价", "大牌", "常规方案", "替代品",
-    ]
-    single_brand_haul_keywords = [
-        "comfortbitch", "comfort", "hoodie", "pants", "tie-dye", "pink", "purple",
-        "kid size", "kid sizes", "adult size", "adult sizes", "童码", "成人码",
-        "扎染", "连帽衫", "运动裤", "试穿", "try them on", "soft", "sale",
-    ]
-
-    unboxing_hits = sum(1 for keyword in unboxing_keywords if keyword in text)
-    review_hits = sum(1 for keyword in review_keywords if keyword in text)
-    direct_showdown_hits = sum(1 for keyword in direct_showdown_keywords if keyword in text)
-    haul_hits = sum(1 for keyword in single_brand_haul_keywords if keyword in text)
-
-    if direct_showdown_hits > 0:
-        return False
-
-    return (unboxing_hits >= 2 and review_hits >= 1) or (unboxing_hits >= 1 and haul_hits >= 3)
-
-
-def normalize_as_unboxing_review(items):
-    reason = "视频主线从包裹/包装开场，持续拆开、取出、展示并评价商品；促销或童码价格技巧只是开箱测评中的卖点，因此判定为开箱评测型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "开箱 / ASMR"
-        item["formula_subtype"] = "开箱评测型"
-        item["category_reason"] = reason
-    return items
-
-
-def should_classify_as_grwm_apparel_haul(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    actual_unboxing_hits = _keyword_hits(text, [
-        "开箱", "拆箱", "拆包", "拆开", "打开包裹", "包裹", "包装", "取出",
-        "package", "packaging", "open it", "open this", "let's open", "unbox", "unboxing",
-    ])
-    haul_hits = _keyword_hits(text, [
-        "haul", "tiktok shop haul", "rapid fire", "shopping cart", "added cart", "购物车",
-    ])
-    worn_or_tryon_hits = _keyword_hits(text, [
-        "穿着", "试穿", "上身", "换上", "展示服装", "面对镜头", "镜头前", "try on",
-        "wearing", "wear", "outfit", "fit", "this is cute", "this one's even cuter",
-    ])
-    apparel_hits = _keyword_hits(text, [
-        "服装", "服饰", "连衣裙", "裙", "t恤", "裤", "鞋", "凉鞋", "墨镜", "配饰",
-        "dress", "t-shirt", "tshirts", "t-shirts", "sweater", "pants", "shoes",
-        "sandals", "glasses", "boxers", "shorts",
-    ])
-    guidance_hits = _keyword_hits(text, [
-        "material", "quality", "stretchy", "thicker", "small", "medium", "large",
-        "too short", "heavy", "lightweight", "oversized", "cropped", "comfy",
-        "材质", "质量", "弹性", "尺码", "偏大", "偏小", "长度", "舒适", "轻便", "搭配",
-    ])
-    multi_item_hits = _keyword_hits(text, [
-        "two colors", "this one's even cuter", "t-shirts", "tshirts", "sweater and the pants",
-        "shoes", "glasses", "boxers", "last", "bundle", "rapid fire", "多件", "多款",
-        "两种颜色", "一堆", "套装", "鞋", "墨镜", "最后一件",
-    ])
-
-    return bool(
-        haul_hits
-        and multi_item_hits
-        and worn_or_tryon_hits
-        and apparel_hits
-        and guidance_hits
-        and not actual_unboxing_hits
-    )
-
-
-def normalize_grwm_apparel_haul(items):
-    reason = "视频主线是创作者真人上身试穿 TikTok Shop 服饰、鞋和配饰，并穿插讲解版型、材质、尺码、搭配和舒适度；没有拆包、取出包装或 ASMR 包装细节，因此应归为 GRWM + 产品 / 教学穿插型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "GRWM + 产品"
-        item["formula_subtype"] = "教学穿插型"
-        item["category_reason"] = reason
-        current_angle = str(item.get("selling_point_angle", "")).strip()
-        if not current_angle or current_angle == "展示效果":
-            item["selling_point_angle"] = "轻松便捷"
-            item["selling_point_subtype"] = "免决策"
-            item["selling_point_reason"] = "创作者用快速真人试穿和尺码材质反馈替观众完成筛选，降低多件服饰下单前的选择成本。"
-        normalize_grwm_apparel_haul_story_step(item)
-    return items
-
-
-def normalize_grwm_apparel_haul_story_step(item):
-    title = str(item.get("title", "")).strip()
-    content_tag = str(item.get("content_tag", "")).strip()
-    text = _story_item_text(item)
-
-    explicit_comparison = _keyword_hits(text, [
-        " vs ", "vs.", "versus", "which is better", "哪个更好", "竞品", "dupe",
-        "better than", "compared with", "side by side", "同框", "分屏", "价格对比", "功能对照",
-    ])
-    if (title == "产品对比" or content_tag == "产品对比") and not explicit_comparison:
-        title = "产品卖点"
-        content_tag = "产品卖点"
-
-    product_reason_hits = _keyword_hits(text, [
-        "material", "quality", "stretchy", "thicker", "small", "medium", "large",
-        "too short", "heavy", "lightweight", "oversized", "cropped", "comfy",
-        "conversation starters", "not a set", "barrel", "ruffle", "doesn't stretch",
-        "材质", "质量", "弹性", "尺码", "偏大", "偏小", "长度", "短", "厚", "轻",
-        "舒适", "成套", "图案", "上身", "穿出门",
-    ])
-    if title in {"情绪营销", "适用场景"} and product_reason_hits:
-        title = "产品卖点"
-        content_tag = "产品卖点"
-
-    item["title"] = title
-    item["content_tag"] = content_tag or title
-    return item
-
-
-def should_classify_as_grwm_ritual_tryon(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    grwm_hits = _keyword_hits(text, [
-        "grwm", "get ready", "mirror", "镜前", "对镜", "穿衣镜", "自拍", "try on", "试穿",
-    ])
-    apparel_hits = _keyword_hits(text, [
-        "牛仔裤", "裤子", "jeans", "pants", "denim", "fit", "版型", "洗水", "剪裁", "穿搭", "服装", "服饰",
-    ])
-    ordered_show_hits = _keyword_hits(text, [
-        "正面", "侧面", "背面", "转身", "多角度", "腰部", "臀部", "尺码", "购买", "链接", "code", "coupon",
-    ])
-
-    return grwm_hits and apparel_hits and ordered_show_hits
-
-
-def normalize_grwm_ritual_tryon(items):
-    reason = "视频以镜前 GRWM POV 试穿为主，按亮相、多角度转身、版型/尺码/购买信息等顺序展示单件服装，属于把产品嵌入个人准备流程的仪式步骤型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("viral_formula") == "GRWM + 产品":
-            item["formula_subtype"] = "仪式步骤型"
-            item["category_reason"] = reason
-    return items
-
-
-def should_classify_as_grwm_ritual_care_routine(items):
-    text = _combined_story_text(items)
-    if not text.strip():
-        return False
-
-    grwm_or_care_hits = _keyword_hits(text, [
-        "grwm", "get ready", "routine", "rutina", "mirror", "bathroom", "shower",
-        "护肤", "护发", "美妆", "洗护", "护理", "浴室", "镜前", "头皮", "头发",
-        "hair", "cabello", "cuero cabelludo", "scalp", "skin", "piel",
-    ])
-    product_hits = _keyword_hits(text, [
-        "product", "spray", "serum", "cream", "oil", "mask", "minoxidil", "keratin", "keratina",
-        "jengibre", "ginger", "shampoo", "conditioner", "喷雾", "精华", "面霜", "发膜", "洗发水",
-        "护发素", "米诺地尔", "角蛋白", "生姜", "成分",
-    ])
-    frequency_hits = _keyword_hits(text, [
-        "cada tres días", "cada dos días", "diario", "every day", "daily", "every two days",
-        "every three days", "per day", "一天", "每天", "两天", "三天", "每周", "频率",
-    ])
-    step_hits = _keyword_hits(text, [
-        "masajea", "massage", "apply", "use it", "usa lo", "usalo", "rinse", "wash", "comb",
-        "涂抹", "按摩", "清洗", "冲洗", "梳理", "使用", "步骤", "顺序", "发根",
-    ])
-    ingredient_hits = _keyword_hits(text, [
-        "ingredients", "ingredientes", "minoxidil", "jengibre", "ginger", "keratin", "keratina",
-        "natural", "suaves", "成分", "米诺地尔", "生姜", "角蛋白", "温和",
-    ])
-    experience_hits = _keyword_hits(text, [
-        "relajado", "relaxed", "feels", "result", "after", "después", "smooth", "thick",
-        "舒服", "放松", "使用后", "效果", "变厚", "顺滑", "体验",
-    ])
-
-    routine_signal_count = sum([
-        bool(frequency_hits),
-        bool(step_hits),
-        bool(ingredient_hits),
-        bool(experience_hits),
-    ])
-
-    return grwm_or_care_hits and product_hits and routine_signal_count >= 2
-
-
-def normalize_grwm_ritual_care_routine(items):
-    reason = "视频虽有开头情绪钩子，但主体围绕护肤/护发/洗护产品的使用频率、操作步骤、成分功效和使用后体验展开，属于把产品嵌入个人护理流程的仪式步骤型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("viral_formula") == "GRWM + 产品":
-            item["formula_subtype"] = "仪式步骤型"
-            item["category_reason"] = reason
-    return items
-
-
-def should_classify_as_grwm_product_care_demo(items):
-    text = _combined_story_text(items).lower()
-    if not text.strip():
-        return False
-
-    care_hits = _keyword_hits(text, [
-        "hair", "scalp", "shampoo", "anti-dht", "dht", "baldness", "hair loss",
-        "thinning hair", "hairline", "redensify", "densify", "bathroom", "shower",
-        "护发", "头发", "头皮", "洗发", "防脱", "脱发", "发际线", "稀疏", "浴室", "洗护",
-        "护肤", "美妆", "护理",
-    ])
-    product_hits = _keyword_hits(text, [
-        "miraj", "product", "bottle", "tube", "shampoo", "serum", "spray", "cream",
-        "品牌", "产品", "瓶", "管装", "包装", "洗发水", "精华", "喷雾", "膏体",
-    ])
-    usage_hits = _keyword_hits(text, [
-        "apply", "wash", "rinse", "comb", "brush", "lather", "foam", "massage",
-        "涂抹", "清洗", "冲洗", "梳", "刷", "起泡", "泡沫", "按摩", "使用", "步骤",
-    ])
-    result_hits = _keyword_hits(text, [
-        "result", "after", "before", "solution", "cover", "coverage", "效果", "使用后", "前后", "解决方案",
-    ])
-
-    return bool(care_hits and product_hits and usage_hits and result_hits)
-
-
-def normalize_grwm_product_care_demo(items):
-    reason = "视频主体是创作者在浴室或镜前亲自完成护发、洗护、美妆等个人护理流程，并清晰露出产品包装、使用步骤和使用后效果；即使画面出现 POV 文案，也应优先归为 GRWM + 产品 / 仪式步骤型，而不是第一人称视角或分屏对比。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "GRWM + 产品"
-        item["formula_subtype"] = "仪式步骤型"
-        item["category_reason"] = reason
-    return items
-
-
-def should_classify_as_same_item_variant_split(items):
-    text = _combined_story_text(items).lower()
-    if not text.strip():
-        return False
-
-    split_hits = _keyword_hits(text, [
-        "分屏", "左右", "同屏", "同框", "并排", "两侧", "交叉剪辑", "快速剪辑", "快速切换",
-        "two colors", "split screen", "side by side",
-    ])
-    variant_hits = _keyword_hits(text, [
-        "粉色", "灰色", "颜色", "两种颜色", "不同颜色", "同款", "同款式", "同一位", "同一名",
-        "长袍", "连衣裙", "头巾", "abaya", "robe", "hijab", "scarf",
-        "pink", "gray", "grey", "same style", "same item", "different color",
-    ])
-    before_after_hits = _keyword_hits(text, [
-        "使用前", "使用后", "有无产品", "before and after", "before/after", "after use", "before use",
-        "半边脸", "左右半边", "效果变化",
-    ])
-    alternative_hits = _keyword_hits(text, [
-        "平替", "替代", "dupe", "alternative", "cheaper", "cheap", "price", "$", "贵价", "竞品", "大牌",
-        "save money", "instead of", "rather than",
-    ])
-
-    return bool(split_hits and variant_hits and not before_after_hits and not alternative_hits)
-
-
-def normalize_same_item_variant_split(items):
-    reason = "画面是同一服装或同款商品的不同颜色/姿态分屏对照展示，核心是变体差异和上身观感；没有使用前/使用后状态，也没有价格、竞品或替代价值证据，因此属于分屏对比 / 产品对比型，不能判为前后分屏型或平替对决型。"
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item["viral_formula"] = "分屏对比"
-        item["formula_subtype"] = "产品对比型"
-        item["category_reason"] = reason
-    return items
-
-
-def normalize_formula_classification(items):
-    if should_classify_as_grwm_apparel_haul(items):
-        return normalize_grwm_apparel_haul(items)
-
-    if should_classify_as_unboxing_review(items):
-        return normalize_as_unboxing_review(items)
-
-    if should_classify_as_same_item_variant_split(items):
-        return normalize_same_item_variant_split(items)
-
-    if should_classify_as_method_comparison(items):
-        return normalize_as_method_comparison(items)
-
-    if should_classify_as_grwm_product_care_demo(items):
-        return normalize_grwm_product_care_demo(items)
-
-    if should_reclassify_as_alternative_showdown(items):
-        reason = "核心表达是贵价/竞品/常规方案与更便宜或替代方案的对比，强调平替价值，因此判定为平替对决型。"
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            item["viral_formula"] = "分屏对比"
-            item["formula_subtype"] = "平替对决型"
-            item["category_reason"] = reason
-        return items
-
-    if should_classify_as_grwm_ritual_tryon(items):
-        return normalize_grwm_ritual_tryon(items)
-
-    if should_classify_as_grwm_ritual_care_routine(items):
-        return normalize_grwm_ritual_care_routine(items)
-
-    return items
-
-
-def enrich_storyboard_result(result_text, video_path):
+def enrich_storyboard_result(result_text, video_path, transcript=None):
     cleaned = normalize_json_text(result_text)
     try:
         parsed = json.loads(cleaned)
@@ -3383,10 +2811,13 @@ def enrich_storyboard_result(result_text, video_path):
     for index, item in enumerate(parsed):
         if not isinstance(item, dict):
             continue
+        
+        # 1. 字段默认值填充（模型可能遗漏字段，做最小兜底）
         item.setdefault("title", item.get("narrative_role") or f"分镜 {index + 1}")
-        item.setdefault("viral_formula", item.get("pattern_category") or "未识别模式")
-        item.setdefault("formula_subtype", item.get("pattern_subtype") or "待判断")
-        item.setdefault("visual_tactic", "按画面与口播综合判断")
+        item.setdefault("content_tag", item.get("title", "产品亮相"))
+        item.setdefault("viral_formula", item.get("pattern_category") or "")
+        item.setdefault("formula_subtype", item.get("pattern_subtype") or "")
+        item.setdefault("visual_tactic", "")
         item.setdefault("conversion_point", "")
         item.setdefault("category_reason", "")
         item.setdefault("selling_point_angle", "")
@@ -3395,19 +2826,34 @@ def enrich_storyboard_result(result_text, video_path):
         item.setdefault("golden_3s_hook", "")
         item.setdefault("golden_3s_subtype", "")
         item.setdefault("golden_3s_reason", "")
+        item.setdefault("opening_hook_summary", "")
+        item.setdefault("opening_hook_evidence", "")
+        item.setdefault("viral_reason_summary", "")
         item.setdefault("product_category", "")
+        item.setdefault("product_classification", "")
+        item.setdefault("evidence_frame", "")
+        item.setdefault("evidence_timestamp", item.get("start_time", 0))
+        
+        # 2. 产品分类白名单校验（强业务约束，必须保留）
         item["product_classification"] = normalize_product_classification(
             item.get("product_classification") or item.get("product_category")
         )
-        item.setdefault("evidence_frame", "")
-        item.setdefault("evidence_timestamp", item.get("start_time", 0))
-        normalize_content_tag(item)
-        normalize_story_step_labels(item)
-        normalize_vehicle_accessory_story_step(item)
-
-    normalize_formula_classification(parsed)
-    normalize_marketing_taxonomies(parsed)
-
+        
+        # 3. 叙事步骤白名单校验（轻量兜底：模型输出非法枚举值时，用 title 回退或最小兜底）
+        title = str(item.get("title", "")).strip()
+        content_tag = str(item.get("content_tag", "")).strip()
+        
+        if content_tag not in ALLOWED_STORY_STEPS:
+            content_tag = ""
+        if title not in ALLOWED_STORY_STEPS:
+            title = content_tag or "产品亮相"
+            
+        item["title"] = title
+        item["content_tag"] = content_tag or title
+        # 新增：清洗 scene_description
+        item = clean_scene_description(item)
+    parsed = fill_storyboard_scripts_from_transcript(parsed, transcript)
+    # 绑定抽帧图片（保留原有逻辑）
     return json.dumps(extract_storyboard_images(video_path, parsed), ensure_ascii=False)
 
 def clean_temp():
@@ -3829,7 +3275,7 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
 
     postprocess_start = time.perf_counter()
     log_analysis_job(job_id, "开始后处理结果")
-    result = enrich_storyboard_result(result, video_path)
+    result = enrich_storyboard_result(result, video_path, transcript=transcript)
     if not parse_result_items(result):
         raise RuntimeError("AI 未生成有效分镜，请重新拆解或更换模型")
     check_analysis_cancelled(job_id)
@@ -3863,6 +3309,27 @@ def run_analysis_pipeline(video_path, filename, model, replace_analysis_id=None,
 
     return stored
 
+import re
+
+# 定义禁止出现在 scene_description 中的目的性前缀/句式
+SCENE_DESCRIPTION_PURPOSE_PATTERNS = [
+    r"旨在.+?。",
+    r"为了.+?。",
+    r"以.*?方式，.*?。",
+    r"建立观众对.+?的期待。?",
+    r"强化其.+?的卖点。?",
+    r"展示产品.+?的核心用法。?",
+    r"证明.+?。",
+    r"突出.+?的优势。?",
+    r"通过.*?，.*?。",
+    r"让观众.*?。",
+]
+
+# 定义需要提醒模型保留原文的画面文字常见误译
+COMMON_SCREEN_TEXT_MISTRANSLATIONS = {
+    "懒人全妆": "Lazy girl full glam",
+    # 后续可扩展
+}
 
 def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=None, transcript_override=None, breakdown_granularity="balanced"):
     log_analysis_job(
@@ -3923,6 +3390,16 @@ def run_analysis_job(job_id, video_path, filename, model, replace_analysis_id=No
         job_cancel_events.pop(job_id, None)
         log_analysis_job(job_id, "后台任务清理完成")
 
+
+# 示例：仅对特定高频 bad case 保留最小兜底
+def _fallback_vehicle_step(item):
+    # 只有模型明显出错时才干预，且必须留下审计日志
+    text = str(item.get("script", "")) + str(item.get("scene_description", ""))
+    if (item.get("title") == "功能演示" and 
+        any(k in text.lower() for k in ["ip68", "waterproof", "sequential turn"])):
+        item["title"] = "产品卖点"
+        item["content_tag"] = "产品卖点"
+        item["_fallback_reason"] = "后端兜底：规格优势词出现在功能演示标签中"
 
 async def _analyze_impl(
     file: UploadFile = None,

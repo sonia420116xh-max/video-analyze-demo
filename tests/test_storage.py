@@ -275,7 +275,7 @@ class AnalysisStorageTest(unittest.TestCase):
              patch.object(main, "extract_audio", return_value=True), \
              patch.object(main, "audio_to_text", return_value=transcript), \
              patch.object(main, "sample_visual_frames", return_value=[]) as sample_frames, \
-             patch.object(main, "build_analysis_prompt", return_value="PROMPT"), \
+             patch.object(main, "", return_value="PROMPT"), \
              patch.object(main, "print_final_prompt_for_debug"), \
              patch.object(main, "analyze_video", return_value=result), \
              patch.object(main, "enrich_storyboard_result", return_value=result), \
@@ -880,6 +880,38 @@ class AnalysisStorageTest(unittest.TestCase):
 
         audio_to_text.assert_called_once()
         build_prompt.assert_called_once_with("", [], granularity="balanced")
+
+    def test_enrich_storyboard_result_fills_script_from_transcript_time_ranges(self):
+        transcript = "\n".join([
+            "0.18 --> 7.86 Just watch this. One swipe and you're perfectly blushed, bronzed, contoured, and highlighted.",
+            "7.86 --> 11.94 That's why I call this my lazy girl full glam because all you have to do is swirl them all around,",
+            "11.94 --> 15.70 hate the high points of your face, and even if you want a quick eye shadow look, take your finger,",
+            "15.70 --> 19.86 press whatever color you want onto your eyelid, so stunning. This is from tar,",
+            "19.86 --> 23.94 it's called the glow wardrobe, and I maintain it's the most pigmented thing that they make.",
+        ])
+        model_result = json.dumps([
+            {
+                "start_time": 8,
+                "end_time": 20,
+                "title": "使用说明",
+                "scene_description": "金发女士用手指蘸取粉盘颜色并点涂眼皮。",
+                "script": "模型写的中文翻译",
+            },
+            {
+                "start_time": 20,
+                "end_time": 24,
+                "title": "产品功效",
+                "scene_description": "金发女士抬起手臂展示多道试色。",
+                "script": "it's called the glow wardrobe",
+            },
+        ], ensure_ascii=False)
+
+        with patch("backend.main.extract_storyboard_images", side_effect=lambda _video_path, items: items):
+            enriched = json.loads(main.enrich_storyboard_result(model_result, "/tmp/not-a-real-video.mp4", transcript=transcript))
+
+        self.assertIn("This is from tar,", enriched[0]["script"])
+        self.assertIn("it's called the glow wardrobe", enriched[1]["script"])
+        self.assertEqual(enriched[0]["script_translation"], "模型写的中文翻译")
 
     def test_audio_to_text_returns_empty_when_asr_is_disabled(self):
         with patch.object(main, "ENABLE_ASR", False), \
